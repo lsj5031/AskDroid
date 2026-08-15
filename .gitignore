@@ -1,0 +1,8 @@
+.DS_Store
+.build/
+.swiftpm/
+*.xcodeproj
+DerivedData/
+AskDroid.app/
+dist/
+.impeccable/config.local.json
