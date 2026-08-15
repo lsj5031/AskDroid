@@ -269,43 +269,97 @@ private final class MockProcess: DroidProcessIO, @unchecked Sendable {
     let standardError: FileHandle
     private let stdoutPipe = Pipe()
     private let stderrPipe = Pipe()
+    private let lock = NSLock()
+    private let exitSemaphore = DispatchSemaphore(value: 0)
+    private var exitStatus: Int32 = 0
+    private var exited = false
     private(set) var written: [String] = []
     private(set) var terminated = false
-    private var exitStatus: Int32 = 0
-    private var exitContinuation: CheckedContinuation<Int32, Never>?
 
     init() {
         standardOutput = stdoutPipe.fileHandleForReading
         standardError = stderrPipe.fileHandleForReading
     }
 
+    var didExit: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return exited
+    }
+
     func write(_ line: String) throws {
+        lock.lock()
         written.append(line)
+        lock.unlock()
     }
 
     func terminate() {
+        lock.lock()
         terminated = true
+        let needsSignal = !exited
+        if !exited {
+            exited = true
+            exitStatus = SIGTERM
+        }
+        lock.unlock()
+        try? stdoutPipe.fileHandleForWriting.close()
+        try? stderrPipe.fileHandleForWriting.close()
+        if needsSignal { exitSemaphore.signal() }
     }
 
-    func waitUntilExit() -> Int32 { exitStatus }
+    func waitUntilExit() -> Int32 {
+        exitSemaphore.wait()
+        lock.lock()
+        defer { lock.unlock() }
+        return exitStatus
+    }
 
     func feedStdout(_ line: String) {
+        guard !didExit else { return }
         stdoutPipe.fileHandleForWriting.write(Data((line + "\n").utf8))
     }
 
     func feedStderr(_ line: String) {
+        guard !didExit else { return }
         stderrPipe.fileHandleForWriting.write(Data((line + "\n").utf8))
     }
 
     func closeStdout() { try? stdoutPipe.fileHandleForWriting.close() }
     func closeStderr() { try? stderrPipe.fileHandleForWriting.close() }
-    func setExit(_ status: Int32) { exitStatus = status }
+
+    func setExit(_ status: Int32) {
+        lock.lock()
+        if !exited {
+            exited = true
+            exitStatus = status
+        }
+        lock.unlock()
+        exitSemaphore.signal()
+    }
 }
 
-private struct MockLauncher: DroidProcessLaunching {
-    let process: MockProcess
+private final class MockLauncher: DroidProcessLaunching, @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [MockProcess] = []
+
+    var processes: [MockProcess] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage.count
+    }
+
     func launch(executable: String, arguments: [String], environment: [String: String], cwd: String) throws -> any DroidProcessIO {
-        process
+        let process = MockProcess()
+        lock.lock()
+        storage.append(process)
+        lock.unlock()
+        return process
     }
 }
 
@@ -319,6 +373,10 @@ private final class EventBox: @unchecked Sendable {
         lock.unlock()
     }
 
+    func recorder() -> @Sendable (DroidRunEvent) -> Void {
+        { event in self.record(event) }
+    }
+
     func snapshot() -> [DroidRunEvent] {
         lock.lock()
         defer { lock.unlock() }
@@ -326,12 +384,20 @@ private final class EventBox: @unchecked Sendable {
     }
 }
 
+private func waitForProcesses(_ launcher: MockLauncher, count: Int) async {
+    for _ in 0..<300 {
+        if launcher.count >= count { return }
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+}
+
 private func runEngine(
     _ engine: DroidEngine,
     request: DroidRunRequest,
+    runID: UUID = UUID(),
     box: EventBox
 ) async {
-    await engine.run(request) { event in
+    await engine.run(request, runID: runID) { event in
         box.record(event)
     }
 }
@@ -344,12 +410,13 @@ final class EngineStateMachineTests: XCTestCase {
     }
 
     func testErrorFromServerSurfacesNotCancelled() async {
-        let process = MockProcess()
-        let engine = DroidEngine(launcher: MockLauncher(process: process), fileExists: { _ in true })
+        let launcher = MockLauncher()
+        let engine = DroidEngine(launcher: launcher, fileExists: { _ in true })
         let box = EventBox()
 
         let driver = Task.detached {
-            try? await Task.sleep(for: .milliseconds(150))
+            await waitForProcesses(launcher, count: 1)
+            let process = launcher.processes[0]
             process.feedStdout(#"{"jsonrpc":"2.0","id":"1","error":{"message":"invalid API key"}}"#)
             process.closeStdout()
             process.closeStderr()
@@ -367,12 +434,13 @@ final class EngineStateMachineTests: XCTestCase {
     }
 
     func testAuthErrorOnStderrSurfacesNotCancelled() async {
-        let process = MockProcess()
-        let engine = DroidEngine(launcher: MockLauncher(process: process), fileExists: { _ in true })
+        let launcher = MockLauncher()
+        let engine = DroidEngine(launcher: launcher, fileExists: { _ in true })
         let box = EventBox()
 
         let driver = Task.detached {
-            try? await Task.sleep(for: .milliseconds(150))
+            await waitForProcesses(launcher, count: 1)
+            let process = launcher.processes[0]
             process.feedStderr("Error: not authenticated. Set FACTORY_API_KEY.")
             process.closeStdout()
             process.closeStderr()
@@ -390,15 +458,16 @@ final class EngineStateMachineTests: XCTestCase {
     }
 
     func testCompletedTurnEmitsResult() async {
-        let process = MockProcess()
-        let engine = DroidEngine(launcher: MockLauncher(process: process), fileExists: { _ in true })
+        let launcher = MockLauncher()
+        let engine = DroidEngine(launcher: launcher, fileExists: { _ in true })
         let box = EventBox()
         let answers = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         var settings = Self.makeSettings()
         settings.answersDirectory = answers.path
 
         let driver = Task.detached {
-            try? await Task.sleep(for: .milliseconds(150))
+            await waitForProcesses(launcher, count: 1)
+            let process = launcher.processes[0]
             process.feedStdout(#"{"jsonrpc":"2.0","id":"1","result":{"session":{"settings":{"modelId":"gpt-5"}}}}"#)
             try? await Task.sleep(for: .milliseconds(150))
             process.feedStdout(#"{"jsonrpc":"2.0","method":"droid.session_notification","params":{"type":"assistant_text_delta","textDelta":"Hello"}}"#)
@@ -422,15 +491,25 @@ final class EngineStateMachineTests: XCTestCase {
     }
 
     func testRunIDsAreUniquePerRun() async {
-        let process = MockProcess()
-        let engine = DroidEngine(launcher: MockLauncher(process: process), fileExists: { _ in true })
+        let launcher = MockLauncher()
+        let engine = DroidEngine(launcher: launcher, fileExists: { _ in true })
         let box = EventBox()
 
         let driver = Task.detached {
-            try? await Task.sleep(for: .milliseconds(150))
-            process.closeStdout()
-            process.closeStderr()
-            process.setExit(0)
+            for _ in 0..<400 {
+                for process in launcher.processes where !process.didExit {
+                    process.closeStdout()
+                    process.closeStderr()
+                    process.setExit(0)
+                }
+                if launcher.count >= 2 { return }
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+            for process in launcher.processes where !process.didExit {
+                process.closeStdout()
+                process.closeStderr()
+                process.setExit(0)
+            }
         }
 
         await runEngine(engine, request: DroidRunRequest(prompt: "a", images: [], settings: Self.makeSettings()), box: box)
@@ -443,5 +522,162 @@ final class EngineStateMachineTests: XCTestCase {
         }
         XCTAssertEqual(ids.count, 2)
         XCTAssertNotEqual(ids[0], ids[1])
+    }
+
+    func testCancelMidRunReportsCancelled() async {
+        let launcher = MockLauncher()
+        let engine = DroidEngine(launcher: launcher, fileExists: { _ in true })
+        let box = EventBox()
+        let runID = UUID()
+
+        let driver = Task.detached {
+            await waitForProcesses(launcher, count: 1)
+            await engine.cancel(runID: runID)
+        }
+
+        await runEngine(
+            engine,
+            request: DroidRunRequest(prompt: "hi", images: [], settings: Self.makeSettings()),
+            runID: runID,
+            box: box
+        )
+        await driver.value
+
+        XCTAssertEqual(launcher.processes.count, 1)
+        XCTAssertTrue(launcher.processes[0].terminated)
+        let failure = box.snapshot().compactMap { event -> String? in
+            if case .failed(_, let message) = event { return message }
+            return nil
+        }.last
+        XCTAssertEqual(failure, DroidEngineError.cancelled.localizedDescription)
+    }
+
+    func testCancelDoesNotKillNewerRun() async {
+        let launcher = MockLauncher()
+        let engine = DroidEngine(launcher: launcher, fileExists: { _ in true })
+        let boxA = EventBox()
+        let boxB = EventBox()
+        let idA = UUID()
+        let idB = UUID()
+        let answers = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        var settings = Self.makeSettings()
+        settings.answersDirectory = answers.path
+        let requestA = DroidRunRequest(prompt: "a", images: [], settings: settings)
+        let requestB = DroidRunRequest(prompt: "b", images: [], settings: settings)
+        let recordA = boxA.recorder()
+        let recordB = boxB.recorder()
+
+        let runA = Task.detached {
+            await engine.run(requestA, runID: idA, onEvent: recordA)
+        }
+        await waitForProcesses(launcher, count: 1)
+
+        let runB = Task.detached {
+            await engine.run(requestB, runID: idB, onEvent: recordB)
+        }
+        await waitForProcesses(launcher, count: 2)
+
+        // Starting B retires A's process; a stray cancel for A must not touch B.
+        XCTAssertTrue(launcher.processes[0].terminated)
+        await engine.cancel(runID: idA)
+        let processB = launcher.processes[1]
+        XCTAssertFalse(processB.terminated)
+
+        processB.feedStdout(#"{"jsonrpc":"2.0","id":"1","result":{"session":{"settings":{"modelId":"gpt-5"}}}}"#)
+        try? await Task.sleep(for: .milliseconds(150))
+        processB.feedStdout(#"{"jsonrpc":"2.0","method":"droid.session_notification","params":{"type":"assistant_text_delta","textDelta":"B answer"}}"#)
+        processB.feedStdout(#"{"jsonrpc":"2.0","method":"droid.session_notification","params":{"type":"agent_turn_completed","durationMs":5}}"#)
+        processB.closeStdout()
+        processB.closeStderr()
+        processB.setExit(0)
+
+        await runA.value
+        await runB.value
+
+        let failureA = boxA.snapshot().compactMap { event -> String? in
+            if case .failed(_, let message) = event { return message }
+            return nil
+        }.last
+        XCTAssertEqual(failureA, DroidEngineError.cancelled.localizedDescription)
+
+        let resultB = boxB.snapshot().compactMap { event -> DroidRunResult? in
+            if case .completed(_, let r) = event { return r }
+            return nil
+        }.last
+        XCTAssertEqual(resultB?.text, "B answer")
+        try? FileManager.default.removeItem(at: answers)
+    }
+}
+
+@MainActor
+final class AskSessionTests: XCTestCase {
+    private func makeSession(launcher: MockLauncher) -> AskSession {
+        var settings = AppSettings.default
+        settings.droidPath = "/tmp/droid"
+        let temp = FileManager.default.temporaryDirectory
+        settings.answersDirectory = temp.appendingPathComponent(UUID().uuidString).path
+        settings.workingDirectory = temp.appendingPathComponent(UUID().uuidString).path
+        return AskSession(
+            settings: settings,
+            engine: DroidEngine(launcher: launcher, fileExists: { _ in true })
+        )
+    }
+
+    func testStaleEventsDroppedAfterCancel() async {
+        let launcher = MockLauncher()
+        let session = makeSession(launcher: launcher)
+        session.isExpanded = true
+        session.prompt = "hello"
+        session.submit()
+
+        for _ in 0..<300 where launcher.count == 0 {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertEqual(launcher.count, 1)
+        let idA = session.currentRunID
+        XCTAssertNotNil(idA)
+        XCTAssertEqual(session.phase, .running)
+
+        session.cancelRun()
+        XCTAssertEqual(session.phase, .failed)
+        XCTAssertNil(session.currentRunID)
+
+        // Stale events from the cancelled run must not mutate the UI.
+        session.handle(.started(idA!))
+        session.handle(.textDelta(idA!, "late text"))
+        session.handle(.log(idA!, "late log"))
+        session.handle(.activity(idA!, "late activity"))
+        session.handle(.failed(idA!, "boom"))
+        session.handle(.completed(idA!, DroidRunResult(
+            text: "late", model: nil, duration: 1,
+            tokenUsage: nil, archiveURL: nil, archiveError: nil
+        )))
+
+        XCTAssertEqual(session.answer, "")
+        XCTAssertFalse(session.runLog.contains("late log"))
+        XCTAssertEqual(session.errorMessage, DroidEngineError.cancelled.localizedDescription)
+        XCTAssertEqual(session.phase, .failed)
+    }
+
+    func testImagePayloadCapSkipsOversized() {
+        let launcher = MockLauncher()
+        let session = makeSession(launcher: launcher)
+        let big = AttachedImage(
+            id: UUID(),
+            data: Data(repeating: 0xFF, count: AskSession.maxImageBytes + 1),
+            mediaType: "image/png",
+            filename: "big.png"
+        )
+        let small = AttachedImage(
+            id: UUID(),
+            data: Data([0x89, 0x50, 0x4E, 0x47]),
+            mediaType: "image/png",
+            filename: "small.png"
+        )
+        let added = session.attach(images: [big, small])
+        XCTAssertTrue(added)
+        XCTAssertEqual(session.images.count, 1)
+        XCTAssertEqual(session.images.first?.filename, "small.png")
+        XCTAssertNotNil(session.notice)
     }
 }

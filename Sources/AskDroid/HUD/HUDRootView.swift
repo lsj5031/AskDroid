@@ -138,6 +138,11 @@ struct ExpandedHUD: View {
                 .contentShape(Rectangle())
             }
 
+            if let notice = session.notice {
+                Text(notice)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Color(red: 1, green: 0.72, blue: 0.42))
+            }
             HStack {
                 Text("Paste or drop images")
                     .font(.system(size: 11))
