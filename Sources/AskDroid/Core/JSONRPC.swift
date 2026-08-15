@@ -51,8 +51,10 @@ enum JSONRPC {
 enum DroidNotification {
     case assistantTextDelta(String)
     case thinking(String)
-    case toolCall(name: String)
+    case toolCall(name: String, detail: String?)
     case toolProgress(name: String)
+    case toolResult(String)
+    case tokenUsage(TokenUsage)
     case workingState(String)
     case error(String)
     case turnCompleted(durationMs: Double?, tokenUsage: TokenUsage?)
@@ -96,10 +98,17 @@ enum DroidNotificationParser {
             return text.isEmpty ? .ignored : .thinking(text)
         case "tool_call":
             let name = toolName(in: payload)
-            return .toolCall(name: name)
+            return .toolCall(name: name, detail: toolDetail(in: payload))
         case "tool_progress_update", "tool_execution_heartbeat", "tool_execution_phase_changed":
             let name = (payload["toolName"] as? String) ?? toolName(in: payload)
             return .toolProgress(name: name)
+        case "tool_result":
+            return .toolResult(toolResultText(from: payload))
+        case "session_token_usage_changed":
+            if let usage = tokenUsage(from: payload["tokenUsage"]) {
+                return .tokenUsage(usage)
+            }
+            return .ignored
         case "droid_working_state_changed":
             return .workingState((payload["newState"] as? String) ?? "working")
         case "error":
@@ -122,6 +131,45 @@ enum DroidNotificationParser {
             return name
         }
         return "tool"
+    }
+
+    private static func toolDetail(in payload: [String: Any]) -> String? {
+        guard let toolUse = payload["toolUse"] as? [String: Any],
+              let input = toolUse["input"] as? [String: Any],
+              !input.isEmpty
+        else { return nil }
+        for key in ["command", "path", "file_path", "filePath", "pattern", "query", "url", "prompt"] {
+            if let value = input[key] as? String, !value.isEmpty {
+                return truncate(value, limit: 120)
+            }
+        }
+        if let data = try? JSONSerialization.data(withJSONObject: input, options: [.sortedKeys]),
+           let text = String(data: data, encoding: .utf8)
+        {
+            return truncate(text, limit: 120)
+        }
+        return nil
+    }
+
+    private static func toolResultText(from payload: [String: Any]) -> String {
+        if let content = payload["content"] as? String {
+            return truncate(content, limit: 240)
+        }
+        if let blocks = payload["content"] as? [[String: Any]] {
+            let text = blocks.compactMap { $0["text"] as? String }.joined(separator: " ")
+            if !text.isEmpty { return truncate(text, limit: 240) }
+        }
+        if let isError = payload["isError"] as? Bool, isError {
+            return "Tool failed."
+        }
+        return "Tool finished."
+    }
+
+    private static func truncate(_ text: String, limit: Int) -> String {
+        let cleaned = text.replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleaned.count > limit else { return cleaned }
+        return String(cleaned.prefix(limit)) + "…"
     }
 
     private static func tokenUsage(from value: Any?) -> TokenUsage? {

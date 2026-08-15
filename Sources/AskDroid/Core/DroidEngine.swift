@@ -367,10 +367,19 @@ actor DroidEngine {
             onEvent(.textDelta(runID, text))
         case .thinking(let text):
             onEvent(.thinking(runID, text))
-        case .toolCall(let name), .toolProgress(let name):
+        case .toolCall(let name, let detail):
             let label = Self.activityLabel(for: name)
             onEvent(.activity(runID, label))
-            onEvent(.log(runID, label))
+            onEvent(.log(runID, detail.map { "\(label) \($0)" } ?? label))
+        case .toolProgress(let name):
+            let label = Self.activityLabel(for: name)
+            onEvent(.activity(runID, label))
+        case .toolResult(let text):
+            onEvent(.log(runID, "→ \(text)"))
+        case .tokenUsage(let usage):
+            if let summary = usage.summary {
+                onEvent(.activity(runID, "Working… \(summary)"))
+            }
         case .workingState(let state):
             let label = Self.workingLabel(for: state)
             onEvent(.activity(runID, label))
@@ -397,6 +406,9 @@ actor DroidEngine {
     ) async {
         let snapshot = await session.snapshot()
         let duration = Date().timeIntervalSince(snapshot.startedAt)
+        if snapshot.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            onEvent(.log(runID, "Turn ended with no text answer."))
+        }
         var archiveURL: URL?
         var archiveError: String?
         if !snapshot.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
