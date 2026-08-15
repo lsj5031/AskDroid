@@ -29,12 +29,16 @@ final class AskSession: ObservableObject {
     @Published var durationText: String?
     @Published var copied = false
     @Published var elapsed: TimeInterval = 0
+    @Published var notice: String?
+
+    static let maxImageBytes = 5 * 1024 * 1024
+    static let maxTotalImageBytes = 15 * 1024 * 1024
 
     let engine: DroidEngine
     private var runTask: Task<Void, Never>?
     private var ticker: Task<Void, Never>?
     private var runStartedAt: Date?
-    private var currentRunID: UUID?
+    private(set) var currentRunID: UUID?
 
     init(settings: AppSettings = SettingsStore.load(), engine: DroidEngine = DroidEngine()) {
         self.settings = settings
@@ -85,6 +89,7 @@ final class AskSession: ObservableObject {
 
     func submit() {
         guard canSubmit, phase != .running else { return }
+        let runID = UUID()
         let request = DroidRunRequest(
             prompt: prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 ? "Look at the attached image(s)."
@@ -101,15 +106,17 @@ final class AskSession: ObservableObject {
         tokenSummary = nil
         durationText = nil
         copied = false
+        notice = nil
         phase = .running
         activity = "Starting Droid…"
         runStartedAt = Date()
         elapsed = 0
+        currentRunID = runID
         startTicker()
 
         runTask?.cancel()
         runTask = Task { [engine] in
-            await engine.run(request) { [weak self] event in
+            await engine.run(request, runID: runID) { [weak self] event in
                 Task { @MainActor in
                     self?.handle(event)
                 }
@@ -118,12 +125,17 @@ final class AskSession: ObservableObject {
     }
 
     func cancelRun() {
+        let runID = currentRunID
         runTask?.cancel()
-        Task { await engine.cancel() }
+        if let runID {
+            Task { await engine.cancel(runID: runID) }
+        }
+        currentRunID = nil
         ticker?.cancel()
         phase = .failed
         errorMessage = DroidEngineError.cancelled.localizedDescription
         activity = "Cancelled"
+        AskLog.line("run \(runID?.uuidString.prefix(8) ?? "none") cancelled by user")
     }
 
     func resetComposer() {
@@ -138,6 +150,7 @@ final class AskSession: ObservableObject {
         tokenSummary = nil
         durationText = nil
         copied = false
+        notice = nil
         phase = isExpanded ? .composing : .idle
         activity = ""
         NotificationCenter.default.post(name: .askDroidResetComposer, object: nil)
@@ -152,25 +165,33 @@ final class AskSession: ObservableObject {
     func attach(images incoming: [AttachedImage]) -> Bool {
         guard !incoming.isEmpty else { return false }
         var added = false
+        var skipped = 0
         for image in incoming where !images.contains(where: { $0.data == image.data }) {
+            let wouldBeTotal = images.reduce(0) { $0 + $1.data.count } + image.data.count
+            if image.data.count > Self.maxImageBytes || wouldBeTotal > Self.maxTotalImageBytes {
+                skipped += 1
+                continue
+            }
             images.append(image)
             added = true
+        }
+        if skipped > 0 {
+            notice = skipped == 1
+                ? "Skipped an image over the size limit (5 MB each, 15 MB total)."
+                : "Skipped \(skipped) images over the size limit (5 MB each, 15 MB total)."
+            AskLog.line("skipped \(skipped) oversized image(s)")
         }
         if added {
             AskLog.line("attached \(incoming.count) image(s) total=\(images.count)")
         }
-        if !isExpanded {
+        if added, !isExpanded {
             present()
         }
         return added
     }
 
     func attach(urls: [URL]) {
-        for url in urls {
-            if let image = AttachedImage.fromFileURL(url) {
-                images.append(image)
-            }
-        }
+        attach(images: urls.compactMap(AttachedImage.fromFileURL))
     }
 
     func removeImage(_ image: AttachedImage) {
@@ -203,10 +224,10 @@ final class AskSession: ObservableObject {
         NSApp.terminate(nil)
     }
 
-    private func handle(_ event: DroidRunEvent) {
+    func handle(_ event: DroidRunEvent) {
         switch event {
         case .started(let runID):
-            currentRunID = runID
+            guard runID == currentRunID else { return }
             phase = .running
             AskLog.line("run \(runID.uuidString.prefix(8)) started")
         case .activity(let runID, let text):
@@ -223,7 +244,13 @@ final class AskSession: ObservableObject {
             appendLog(text)
             AskLog.line("run: \(text)")
         case .completed(let runID, let result):
-            guard runID == currentRunID, phase == .running else { return }
+            guard runID == currentRunID, phase == .running else {
+                if let url = result.archiveURL {
+                    AskLog.line("late completion from run \(runID.uuidString.prefix(8)); archived \(url.lastPathComponent)")
+                    notifyLateArchive(url)
+                }
+                return
+            }
             ticker?.cancel()
             answer = result.text
             archiveURL = result.archiveURL
@@ -276,6 +303,18 @@ final class AskSession: ObservableObject {
                 self.elapsed = Date().timeIntervalSince(started)
             }
         }
+    }
+
+    private func notifyLateArchive(_ url: URL) {
+        let content = UNMutableNotificationContent()
+        content.title = "AskDroid"
+        content.body = "A cancelled run finished and saved \(url.lastPathComponent)."
+        let request = UNNotificationRequest(
+            identifier: UUID().uuidString,
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request)
     }
 
     private func notifyIfCollapsed(success: Bool) {

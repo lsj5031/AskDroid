@@ -120,13 +120,11 @@ final class NotchPanelController {
         applySize(measuredSize())
         panel.alphaValue = 1
         panel.orderFrontRegardless()
-        NSApp.setActivationPolicy(.accessory)
         AskLog.line("showPill \(debugDescription)")
     }
 
     private func hide() {
         panel.orderOut(nil)
-        NSApp.setActivationPolicy(.accessory)
         AskLog.line("hide")
     }
 

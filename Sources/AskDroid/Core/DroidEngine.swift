@@ -132,7 +132,7 @@ struct FoundationProcessLauncher: DroidProcessLaunching {
 actor DroidEngine {
     private let launcher: any DroidProcessLaunching
     private let fileExists: @Sendable (String) -> Bool
-    private var activeProcess: (any DroidProcessIO)?
+    private var activeProcess: (runID: UUID, process: any DroidProcessIO)?
 
     init(
         launcher: any DroidProcessLaunching = FoundationProcessLauncher(),
@@ -142,16 +142,17 @@ actor DroidEngine {
         self.fileExists = fileExists
     }
 
-    func cancel() {
-        activeProcess?.terminate()
+    func cancel(runID: UUID) {
+        guard let active = activeProcess, active.runID == runID else { return }
+        active.process.terminate()
         activeProcess = nil
     }
 
     func run(
         _ request: DroidRunRequest,
+        runID: UUID = UUID(),
         onEvent: @escaping @Sendable (DroidRunEvent) -> Void
     ) async {
-        let runID = UUID()
         let startedAt = Date()
         onEvent(.started(runID))
         onEvent(.activity(runID, "Starting Droid…"))
@@ -195,7 +196,10 @@ actor DroidEngine {
                 environment: Self.augmentedEnvironment(),
                 cwd: cwd
             )
-            activeProcess = process
+            if let stale = activeProcess {
+                stale.process.terminate()
+            }
+            activeProcess = (runID, process)
             onEvent(.activity(runID, "Opening a Droid session…"))
             onEvent(.log(runID, "cwd \(cwd)"))
 
@@ -264,7 +268,7 @@ actor DroidEngine {
             turnTimeout.cancel()
             _ = await stdoutTask.result
             _ = await stderrTask.result
-            if activeProcess === process {
+            if activeProcess?.runID == runID {
                 activeProcess = nil
             }
 
@@ -284,11 +288,15 @@ actor DroidEngine {
             }
             await emitCompletion(session: session, runID: runID, onEvent: onEvent)
         } catch is CancellationError {
-            activeProcess?.terminate()
-            activeProcess = nil
+            if activeProcess?.runID == runID {
+                activeProcess?.process.terminate()
+                activeProcess = nil
+            }
             onEvent(.failed(runID, DroidEngineError.cancelled.localizedDescription))
         } catch {
-            activeProcess = nil
+            if activeProcess?.runID == runID {
+                activeProcess = nil
+            }
             onEvent(.failed(runID, error.localizedDescription))
         }
     }
