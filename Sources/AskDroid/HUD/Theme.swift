@@ -1,0 +1,17 @@
+import SwiftUI
+
+enum Theme {
+    static let accent = Color(red: 0.98, green: 0.62, blue: 0.18)
+    static let ink = Color.white.opacity(0.92)
+    static let mute = Color.white.opacity(0.56)
+    static let hairline = Color.white.opacity(0.10)
+    static let well = Color.black.opacity(0.28)
+    static let panelFill = Color(red: 0.07, green: 0.07, blue: 0.075)
+    static let pillFill = Color(red: 0.08, green: 0.08, blue: 0.085)
+
+    static let panelWidth: CGFloat = 560
+    static let pillWidth: CGFloat = 280
+    static let pillHeight: CGFloat = 34
+    static let panelCorner: CGFloat = 18
+    static let pillCorner: CGFloat = 17
+}
