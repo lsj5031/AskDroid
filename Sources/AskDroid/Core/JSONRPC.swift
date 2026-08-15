@@ -106,7 +106,7 @@ enum DroidNotificationParser {
             return .error((payload["message"] as? String) ?? "Droid reported an error.")
         case "agent_turn_completed":
             return .turnCompleted(
-                durationMs: payload["durationMs"] as? Double,
+                durationMs: doubleValue(payload["durationMs"]),
                 tokenUsage: tokenUsage(from: payload["tokenUsage"])
             )
         default:
@@ -135,6 +135,12 @@ enum DroidNotificationParser {
     private static func intValue(_ value: Any?) -> Int? {
         if let number = value as? Int { return number }
         if let number = value as? Double { return Int(number) }
+        return nil
+    }
+
+    private static func doubleValue(_ value: Any?) -> Double? {
+        if let number = value as? Double { return number }
+        if let number = value as? Int { return Double(number) }
         return nil
     }
 }

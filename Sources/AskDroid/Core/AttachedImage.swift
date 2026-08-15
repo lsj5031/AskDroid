@@ -43,7 +43,6 @@ struct AttachedImage: Identifiable, Equatable, Sendable {
             (NSPasteboard.PasteboardType("public.webp"), "image/webp"),
             (NSPasteboard.PasteboardType("public.heic"), "image/heic"),
             (NSPasteboard.PasteboardType("public.heif"), "image/heif"),
-            (NSPasteboard.PasteboardType("com.apple.webarchive"), "image/png"),
         ]
         if images.isEmpty {
             for (type, mime) in typedData {
@@ -112,9 +111,9 @@ struct AttachedImage: Identifiable, Equatable, Sendable {
     }
 
     static func fromData(_ data: Data, hintedType: String?, filename: String? = nil) -> AttachedImage? {
-        let hinted = normalizeMediaType(hintedType)
         let sniffed = sniffMediaType(data)
-        let mediaType = hinted ?? sniffed
+        let hinted = normalizeMediaType(hintedType)
+        let mediaType = sniffed ?? hinted
         guard let mediaType else {
             if let image = NSImage(data: data) {
                 return fromNSImage(image, filename: filename)

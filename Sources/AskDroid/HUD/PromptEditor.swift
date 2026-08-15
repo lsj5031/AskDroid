@@ -74,6 +74,12 @@ struct PromptEditor: NSViewRepresentable {
             name: .askDroidFocusInput,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            context.coordinator,
+            selector: #selector(Coordinator.resetEditor),
+            name: .askDroidResetComposer,
+            object: nil
+        )
         return scroll
     }
 
@@ -125,6 +131,12 @@ struct PromptEditor: NSViewRepresentable {
             if textView.window?.firstResponder !== textView {
                 textView.window?.makeFirstResponder(textView)
             }
+        }
+
+        @objc func resetEditor() {
+            guard let textView, textView.string != text.wrappedValue else { return }
+            textView.string = text.wrappedValue
+            textView.setSelectedRange(NSRange(location: 0, length: 0))
         }
     }
 }

@@ -212,3 +212,187 @@ final class LineReaderTests: XCTestCase {
         XCTAssertEqual(second, ["world"])
     }
 }
+
+// MARK: - Engine state machine
+
+private final class MockProcess: DroidProcessIO, @unchecked Sendable {
+    let standardOutput: FileHandle
+    let standardError: FileHandle
+    private let stdoutPipe = Pipe()
+    private let stderrPipe = Pipe()
+    private(set) var written: [String] = []
+    private(set) var terminated = false
+    private var exitStatus: Int32 = 0
+    private var exitContinuation: CheckedContinuation<Int32, Never>?
+
+    init() {
+        standardOutput = stdoutPipe.fileHandleForReading
+        standardError = stderrPipe.fileHandleForReading
+    }
+
+    func write(_ line: String) throws {
+        written.append(line)
+    }
+
+    func terminate() {
+        terminated = true
+    }
+
+    func waitUntilExit() -> Int32 { exitStatus }
+
+    func feedStdout(_ line: String) {
+        stdoutPipe.fileHandleForWriting.write(Data((line + "\n").utf8))
+    }
+
+    func feedStderr(_ line: String) {
+        stderrPipe.fileHandleForWriting.write(Data((line + "\n").utf8))
+    }
+
+    func closeStdout() { try? stdoutPipe.fileHandleForWriting.close() }
+    func closeStderr() { try? stderrPipe.fileHandleForWriting.close() }
+    func setExit(_ status: Int32) { exitStatus = status }
+}
+
+private struct MockLauncher: DroidProcessLaunching {
+    let process: MockProcess
+    func launch(executable: String, arguments: [String], environment: [String: String], cwd: String) throws -> any DroidProcessIO {
+        process
+    }
+}
+
+private final class EventBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [DroidRunEvent] = []
+
+    func record(_ event: DroidRunEvent) {
+        lock.lock()
+        storage.append(event)
+        lock.unlock()
+    }
+
+    func snapshot() -> [DroidRunEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+}
+
+private func runEngine(
+    _ engine: DroidEngine,
+    request: DroidRunRequest,
+    box: EventBox
+) async {
+    await engine.run(request) { event in
+        box.record(event)
+    }
+}
+
+final class EngineStateMachineTests: XCTestCase {
+    private static func makeSettings() -> AppSettings {
+        var s = AppSettings.default
+        s.droidPath = "/tmp/droid"
+        return s
+    }
+
+    func testErrorFromServerSurfacesNotCancelled() async {
+        let process = MockProcess()
+        let engine = DroidEngine(launcher: MockLauncher(process: process), fileExists: { _ in true })
+        let box = EventBox()
+
+        let driver = Task.detached {
+            try? await Task.sleep(for: .milliseconds(150))
+            process.feedStdout(#"{"jsonrpc":"2.0","id":"1","error":{"message":"invalid API key"}}"#)
+            process.closeStdout()
+            process.closeStderr()
+            process.setExit(1)
+        }
+
+        await runEngine(engine, request: DroidRunRequest(prompt: "hi", images: [], settings: Self.makeSettings()), box: box)
+        await driver.value
+
+        let failure = box.snapshot().compactMap { event -> String? in
+            if case .failed(_, let message) = event { return message }
+            return nil
+        }.last
+        XCTAssertEqual(failure, "invalid API key")
+    }
+
+    func testAuthErrorOnStderrSurfacesNotCancelled() async {
+        let process = MockProcess()
+        let engine = DroidEngine(launcher: MockLauncher(process: process), fileExists: { _ in true })
+        let box = EventBox()
+
+        let driver = Task.detached {
+            try? await Task.sleep(for: .milliseconds(150))
+            process.feedStderr("Error: not authenticated. Set FACTORY_API_KEY.")
+            process.closeStdout()
+            process.closeStderr()
+            process.setExit(1)
+        }
+
+        await runEngine(engine, request: DroidRunRequest(prompt: "hi", images: [], settings: Self.makeSettings()), box: box)
+        await driver.value
+
+        let failure = box.snapshot().compactMap { event -> String? in
+            if case .failed(_, let message) = event { return message }
+            return nil
+        }.last
+        XCTAssertEqual(failure, DroidEngineError.notAuthenticated.localizedDescription)
+    }
+
+    func testCompletedTurnEmitsResult() async {
+        let process = MockProcess()
+        let engine = DroidEngine(launcher: MockLauncher(process: process), fileExists: { _ in true })
+        let box = EventBox()
+        let answers = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        var settings = Self.makeSettings()
+        settings.answersDirectory = answers.path
+
+        let driver = Task.detached {
+            try? await Task.sleep(for: .milliseconds(150))
+            process.feedStdout(#"{"jsonrpc":"2.0","id":"1","result":{"session":{"settings":{"modelId":"gpt-5"}}}}"#)
+            try? await Task.sleep(for: .milliseconds(150))
+            process.feedStdout(#"{"jsonrpc":"2.0","method":"droid.session_notification","params":{"type":"assistant_text_delta","textDelta":"Hello"}}"#)
+            process.feedStdout(#"{"jsonrpc":"2.0","method":"droid.session_notification","params":{"type":"agent_turn_completed","durationMs":1200,"tokenUsage":{"inputTokens":3,"outputTokens":4}}}"#)
+            process.closeStdout()
+            process.closeStderr()
+            process.setExit(0)
+        }
+
+        await runEngine(engine, request: DroidRunRequest(prompt: "hi", images: [], settings: settings), box: box)
+        await driver.value
+
+        let result = box.snapshot().compactMap { event -> DroidRunResult? in
+            if case .completed(_, let r) = event { return r }
+            return nil
+        }.last
+        XCTAssertEqual(result?.text, "Hello")
+        XCTAssertEqual(result?.model, "gpt-5")
+        XCTAssertNotNil(result?.archiveURL)
+        try? FileManager.default.removeItem(at: answers)
+    }
+
+    func testRunIDsAreUniquePerRun() async {
+        let process = MockProcess()
+        let engine = DroidEngine(launcher: MockLauncher(process: process), fileExists: { _ in true })
+        let box = EventBox()
+
+        let driver = Task.detached {
+            try? await Task.sleep(for: .milliseconds(150))
+            process.closeStdout()
+            process.closeStderr()
+            process.setExit(0)
+        }
+
+        await runEngine(engine, request: DroidRunRequest(prompt: "a", images: [], settings: Self.makeSettings()), box: box)
+        await runEngine(engine, request: DroidRunRequest(prompt: "b", images: [], settings: Self.makeSettings()), box: box)
+        await driver.value
+
+        let ids = box.snapshot().compactMap { event -> UUID? in
+            if case .started(let id) = event { return id }
+            return nil
+        }
+        XCTAssertEqual(ids.count, 2)
+        XCTAssertNotEqual(ids[0], ids[1])
+    }
+}

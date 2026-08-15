@@ -34,6 +34,7 @@ final class AskSession: ObservableObject {
     private var runTask: Task<Void, Never>?
     private var ticker: Task<Void, Never>?
     private var runStartedAt: Date?
+    private var currentRunID: UUID?
 
     init(settings: AppSettings = SettingsStore.load(), engine: DroidEngine = DroidEngine()) {
         self.settings = settings
@@ -103,6 +104,7 @@ final class AskSession: ObservableObject {
         phase = .running
         activity = "Starting Droid…"
         runStartedAt = Date()
+        elapsed = 0
         startTicker()
 
         runTask?.cancel()
@@ -138,6 +140,7 @@ final class AskSession: ObservableObject {
         copied = false
         phase = isExpanded ? .composing : .idle
         activity = ""
+        NotificationCenter.default.post(name: .askDroidResetComposer, object: nil)
     }
 
     @discardableResult
@@ -188,7 +191,11 @@ final class AskSession: ObservableObject {
 
     func saveSettings() {
         SettingsStore.save(settings)
-        LaunchAtLogin.setEnabled(settings.launchAtLogin)
+        let applied = LaunchAtLogin.setEnabled(settings.launchAtLogin)
+        if !applied {
+            settings.launchAtLogin = LaunchAtLogin.isEnabled
+            SettingsStore.save(settings)
+        }
         NotificationCenter.default.post(name: .askDroidHotkeyChanged, object: settings)
     }
 
@@ -198,18 +205,23 @@ final class AskSession: ObservableObject {
 
     private func handle(_ event: DroidRunEvent) {
         switch event {
-        case .started:
+        case .started(let runID):
+            currentRunID = runID
             phase = .running
-        case .activity(let text):
+        case .activity(let runID, let text):
+            guard runID == currentRunID else { return }
             activity = text
-        case .thinking(let text):
+        case .thinking(let runID, let text):
+            guard runID == currentRunID else { return }
             thinking.append(text)
-        case .textDelta(let text):
+        case .textDelta(let runID, let text):
+            guard runID == currentRunID else { return }
             answer.append(text)
-        case .log(let text):
+        case .log(let runID, let text):
+            guard runID == currentRunID else { return }
             appendLog(text)
-        case .completed(let result):
-            guard phase == .running else { return }
+        case .completed(let runID, let result):
+            guard runID == currentRunID, phase == .running else { return }
             ticker?.cancel()
             answer = result.text
             archiveURL = result.archiveURL
@@ -219,8 +231,8 @@ final class AskSession: ObservableObject {
             activity = result.archiveError == nil ? "Done" : "Answer ready, file not saved"
             phase = .completed
             notifyIfCollapsed(success: true)
-        case .failed(let message):
-            guard phase == .running else { return }
+        case .failed(let runID, let message):
+            guard runID == currentRunID, phase == .running else { return }
             ticker?.cancel()
             errorMessage = message
             activity = "Failed"
@@ -267,16 +279,25 @@ final class AskSession: ObservableObject {
 }
 
 enum LaunchAtLogin {
-    static func setEnabled(_ enabled: Bool) {
-        guard #available(macOS 13.0, *) else { return }
+    static var isEnabled: Bool {
+        guard #available(macOS 13.0, *) else { return false }
+        return SMAppService.mainApp.status == .enabled
+    }
+
+    @discardableResult
+    static func setEnabled(_ enabled: Bool) -> Bool {
+        guard #available(macOS 13.0, *) else { return false }
         do {
             if enabled {
                 try SMAppServiceAdapter.register()
             } else {
                 try SMAppServiceAdapter.unregister()
             }
+            return true
         } catch {
             NSLog("AskDroid launch-at-login failed: \(error.localizedDescription)")
+            AskLog.line("launch-at-login failed: \(error.localizedDescription)")
+            return false
         }
     }
 }
@@ -312,4 +333,5 @@ enum ServiceManagementBridge {
 extension Notification.Name {
     static let askDroidFocusInput = Notification.Name("askDroidFocusInput")
     static let askDroidHotkeyChanged = Notification.Name("askDroidHotkeyChanged")
+    static let askDroidResetComposer = Notification.Name("askDroidResetComposer")
 }
