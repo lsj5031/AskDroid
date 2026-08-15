@@ -208,6 +208,7 @@ final class AskSession: ObservableObject {
         case .started(let runID):
             currentRunID = runID
             phase = .running
+            AskLog.line("run \(runID.uuidString.prefix(8)) started")
         case .activity(let runID, let text):
             guard runID == currentRunID else { return }
             activity = text
@@ -220,6 +221,7 @@ final class AskSession: ObservableObject {
         case .log(let runID, let text):
             guard runID == currentRunID else { return }
             appendLog(text)
+            AskLog.line("run: \(text)")
         case .completed(let runID, let result):
             guard runID == currentRunID, phase == .running else { return }
             ticker?.cancel()
@@ -228,15 +230,25 @@ final class AskSession: ObservableObject {
             archiveError = result.archiveError
             tokenSummary = result.tokenUsage?.summary
             durationText = AnswerArchive.formatDuration(result.duration)
-            activity = result.archiveError == nil ? "Done" : "Answer ready, file not saved"
-            phase = .completed
-            notifyIfCollapsed(success: true)
+            if answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                activity = "Droid ended the turn with no answer"
+                errorMessage = "Droid produced no text. In read-only mode every tool call is auto-rejected, so Droid may have had nothing to say. Try rephrasing, or raise autonomy in Settings."
+                phase = .failed
+                AskLog.line("run \(runID.uuidString.prefix(8)) completed with empty answer")
+                notifyIfCollapsed(success: false)
+            } else {
+                activity = result.archiveError == nil ? "Done" : "Answer ready, file not saved"
+                phase = .completed
+                AskLog.line("run \(runID.uuidString.prefix(8)) completed archive=\(result.archiveURL?.lastPathComponent ?? "none") archiveError=\(result.archiveError ?? "none")")
+                notifyIfCollapsed(success: true)
+            }
         case .failed(let runID, let message):
             guard runID == currentRunID, phase == .running else { return }
             ticker?.cancel()
             errorMessage = message
             activity = "Failed"
             phase = .failed
+            AskLog.line("run \(runID.uuidString.prefix(8)) failed: \(message)")
             notifyIfCollapsed(success: false)
         }
     }

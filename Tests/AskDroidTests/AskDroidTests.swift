@@ -35,7 +35,7 @@ final class JSONRPCTests: XCTestCase {
                 "toolUse": ["name": "Read", "id": "1", "input": [:]],
             ],
         ]
-        if case .toolCall(let name) = DroidNotificationParser.parse(tool) {
+        if case .toolCall(let name, _) = DroidNotificationParser.parse(tool) {
             XCTAssertEqual(name, "Read")
         } else {
             XCTFail("expected tool call")
@@ -56,6 +56,49 @@ final class JSONRPCTests: XCTestCase {
         XCTAssertEqual(params["machineId"] as? String, "askdroid")
         XCTAssertNil(params["sessionSource"])
         XCTAssertEqual(params["autoRejectPermissionRequests"] as? Bool, true)
+    }
+
+    func testNotificationParserReadsToolResultAndTokenUsage() {
+        let result: [String: Any] = [
+            "params": [
+                "type": "tool_result",
+                "content": "Error: Tool execution cancelled by user",
+                "isError": true,
+            ],
+        ]
+        if case .toolResult(let text) = DroidNotificationParser.parse(result) {
+            XCTAssertTrue(text.contains("cancelled"))
+        } else {
+            XCTFail("expected tool result")
+        }
+
+        let usage: [String: Any] = [
+            "params": [
+                "type": "session_token_usage_changed",
+                "tokenUsage": ["inputTokens": 353, "outputTokens": 479],
+            ],
+        ]
+        if case .tokenUsage(let tokens) = DroidNotificationParser.parse(usage) {
+            XCTAssertEqual(tokens.inputTokens, 353)
+            XCTAssertEqual(tokens.outputTokens, 479)
+        } else {
+            XCTFail("expected token usage")
+        }
+    }
+
+    func testNotificationParserReadsToolCallDetail() {
+        let tool: [String: Any] = [
+            "params": [
+                "type": "tool_call",
+                "toolUse": ["name": "Execute", "id": "1", "input": ["command": "ls -la"]],
+            ],
+        ]
+        if case .toolCall(let name, let detail) = DroidNotificationParser.parse(tool) {
+            XCTAssertEqual(name, "Execute")
+            XCTAssertEqual(detail, "ls -la")
+        } else {
+            XCTFail("expected tool call with detail")
+        }
     }
 
     func testUserMessageImagesUseBase64Shape() {

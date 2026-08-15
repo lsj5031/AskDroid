@@ -188,11 +188,15 @@ struct ExpandedHUD: View {
                 }
                 if !session.runLog.isEmpty {
                     VStack(alignment: .leading, spacing: 3) {
-                        ForEach(Array(session.runLog.suffix(8).enumerated()), id: \.offset) { _, line in
+                        Text("Activity")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Theme.mute)
+                        ForEach(Array(session.runLog.suffix(20).enumerated()), id: \.offset) { _, line in
                             Text(line)
                                 .font(.system(size: 11).monospaced())
                                 .foregroundStyle(Theme.mute)
                                 .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }
