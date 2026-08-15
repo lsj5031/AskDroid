@@ -29,6 +29,7 @@ enum AnswerArchive {
     }
 
     static func markdown(
+        date: Date = Date(),
         question: String,
         answer: String,
         model: String?,
@@ -38,7 +39,7 @@ enum AnswerArchive {
         var lines: [String] = [
             "# AskDroid",
             "",
-            "- Asked: \(ISO8601DateFormatter().string(from: Date()))",
+            "- Asked: \(ISO8601DateFormatter().string(from: date))",
         ]
         if let model, !model.isEmpty {
             lines.append("- Model: \(model)")
@@ -90,6 +91,7 @@ enum AnswerArchive {
 
         let markdownURL = directory.appendingPathComponent("\(base).md")
         let body = markdown(
+            date: date,
             question: question,
             answer: answer,
             model: model,

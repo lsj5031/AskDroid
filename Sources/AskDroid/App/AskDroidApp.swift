@@ -124,24 +124,59 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 enum AskLog {
+    private static let maxBytes: UInt64 = 512 * 1024
+    private static let state = LogState()
+
     static func line(_ message: String) {
-        let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/AskDroid", isDirectory: true)
-        do {
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            let url = dir.appendingPathComponent("askdroid.log")
-            let stamp = ISO8601DateFormatter().string(from: Date())
-            let data = Data("\(stamp) \(message)\n".utf8)
-            if FileManager.default.fileExists(atPath: url.path) {
-                let handle = try FileHandle(forWritingTo: url)
-                defer { try? handle.close() }
+        state.write(message)
+    }
+
+    private final class LogState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var handle: FileHandle?
+        private var url: URL?
+
+        func write(_ message: String) {
+            lock.lock()
+            defer { lock.unlock() }
+            let dir = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Logs/AskDroid", isDirectory: true)
+            do {
+                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                let fileURL = dir.appendingPathComponent("askdroid.log")
+                rotateIfNeeded(fileURL)
+                let handle = try openHandle(fileURL)
+                let stamp = ISO8601DateFormatter().string(from: Date())
+                let data = Data("\(stamp) \(message)\n".utf8)
                 try handle.seekToEnd()
                 try handle.write(contentsOf: data)
-            } else {
-                try data.write(to: url)
+            } catch {
+                NSLog("AskDroid log failed: \(error.localizedDescription)")
             }
-        } catch {
-            NSLog("AskDroid log failed: \(error.localizedDescription)")
+        }
+
+        private func openHandle(_ fileURL: URL) throws -> FileHandle {
+            if let handle, url == fileURL {
+                return handle
+            }
+            if !FileManager.default.fileExists(atPath: fileURL.path) {
+                FileManager.default.createFile(atPath: fileURL.path, contents: nil)
+            }
+            let handle = try FileHandle(forWritingTo: fileURL)
+            self.handle = handle
+            self.url = fileURL
+            return handle
+        }
+
+        private func rotateIfNeeded(_ fileURL: URL) {
+            guard let size = try? FileManager.default.attributesOfItem(atPath: fileURL.path)[.size] as? UInt64,
+                  size > AskLog.maxBytes
+            else { return }
+            try? handle?.close()
+            handle = nil
+            let rotated = fileURL.deletingLastPathComponent().appendingPathComponent("askdroid.1.log")
+            try? FileManager.default.removeItem(at: rotated)
+            try? FileManager.default.moveItem(at: fileURL, to: rotated)
         }
     }
 }

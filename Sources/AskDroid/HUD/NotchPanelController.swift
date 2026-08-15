@@ -131,9 +131,6 @@ final class NotchPanelController {
     }
 
     private func stealFocus() {
-        if NSApp.activationPolicy() != .regular {
-            NSApp.setActivationPolicy(.regular)
-        }
         NSApp.activate(ignoringOtherApps: true)
         panel.makeKeyAndOrderFront(nil)
         panel.orderFrontRegardless()
@@ -165,7 +162,7 @@ final class NotchPanelController {
 
     private func measuredSize() -> CGSize {
         if session.isExpanded {
-            var height: CGFloat = session.isSettingsOpen ? 420 : 280
+            var height: CGFloat = session.isSettingsOpen ? 560 : 280
             if !session.images.isEmpty { height += 72 }
             if !session.answer.isEmpty || !session.thinking.isEmpty || !session.runLog.isEmpty || session.phase == .running || session.phase == .failed {
                 height += 220

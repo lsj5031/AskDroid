@@ -55,8 +55,10 @@ struct ExpandedHUD: View {
             header
             Divider().overlay(Theme.hairline)
             if session.isSettingsOpen {
-                SettingsPane(session: session)
-                    .padding(16)
+                ScrollView {
+                    SettingsPane(session: session)
+                        .padding(16)
+                }
             } else {
                 composer
                 if !session.answer.isEmpty || session.phase == .running || session.phase == .failed {
