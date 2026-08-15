@@ -25,7 +25,7 @@ Unlike Shortcuts wrappers (ask-pi) it is a real native surface: image paste, liv
 ## Operating Context
 
 - Requires a working `droid` CLI (discovered on PATH, then common install locations).
-- Default autonomy is Droid's read-only default; advanced settings may raise `--auto`.
+- Default autonomy is high (`--auto high`), scoped to a sandboxed working directory; settings may lower it to read-only.
 - Answers land in `~/Library/Application Support/AskDroid/answers` as timestamped Markdown plus any pasted images.
 - The default working directory is `~/Library/Application Support/AskDroid/workspace`, not the user's home folder.
 - Used at the laptop, often while another app is focused; the HUD must not steal the Dock or a menu-bar slot.
@@ -44,7 +44,7 @@ Confirmed for v1:
 - Advanced settings: hotkey, model, reasoning, autonomy, cwd, answers folder, droid path, launch at login.
 - JSON-RPC client over `droid exec --input-format stream-jsonrpc --output-format stream-jsonrpc`.
 
-Out of scope for v1: multi-turn chat, menu bar item, HTML session traces, interactive permission prompts (auto-decline unless autonomy is raised).
+Out of scope for v1: multi-turn chat, menu bar item, HTML session traces, interactive permission prompts (auto-declined).
 
 ## Brand Commitments
 
