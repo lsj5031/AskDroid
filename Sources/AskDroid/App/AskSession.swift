@@ -232,7 +232,11 @@ final class AskSession: ObservableObject {
             durationText = AnswerArchive.formatDuration(result.duration)
             if answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 activity = "Droid ended the turn with no answer"
-                errorMessage = "Droid produced no text. In read-only mode every tool call is auto-rejected, so Droid may have had nothing to say. Try rephrasing, or raise autonomy in Settings."
+                if settings.autonomy == .off {
+                    errorMessage = "Droid produced no text. In read-only mode every tool call is auto-rejected, so Droid may have had nothing to say. Try rephrasing, or raise autonomy in Settings."
+                } else {
+                    errorMessage = "Droid ended the turn without writing an answer. The activity log shows what happened."
+                }
                 phase = .failed
                 AskLog.line("run \(runID.uuidString.prefix(8)) completed with empty answer")
                 notifyIfCollapsed(success: false)

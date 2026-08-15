@@ -163,6 +163,12 @@ final class ArchiveTests: XCTestCase {
         XCTAssertFalse(AppSettings.isLegacyHomeAnswersDirectory(AppSettings.defaultAnswersDirectory))
     }
 
+    func testDefaultAutonomyIsHigh() {
+        XCTAssertEqual(AppSettings.default.autonomy, .high)
+        let params = DroidEngine.initializeParams(from: .default)
+        XCTAssertEqual(params["autonomyLevel"] as? String, "high")
+    }
+
     func testWriteCreatesMissingAnswersDirectory() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("askdroid-archive-\(UUID().uuidString)", isDirectory: true)

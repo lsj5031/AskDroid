@@ -32,7 +32,7 @@ struct SettingsPane: View {
                     .pickerStyle(.menu)
                 }
             }
-            Text("Droid stays read-only unless you raise autonomy. High can edit, run commands, and push.")
+            Text("Default is High: Droid can edit files, run commands, and push inside the working directory. Choose Read-only to disable tools.")
                 .font(.system(size: 11))
                 .foregroundStyle(Theme.mute)
             labeled("Working directory") {

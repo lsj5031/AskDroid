@@ -88,7 +88,7 @@ struct AppSettings: Equatable, Sendable {
             hotkeyModifiers: defaultHotkeyModifiers,
             modelOverride: "",
             reasoning: .droidDefault,
-            autonomy: .droidDefault,
+            autonomy: .high,
             workingDirectory: defaultWorkingDirectory,
             answersDirectory: defaultAnswersDirectory,
             droidPath: "",
@@ -147,6 +147,12 @@ enum SettingsStore {
            let value = AutonomySetting(rawValue: raw)
         {
             settings.autonomy = value
+        }
+        // Product default moved from Droid's read-only default to high.
+        // Migrate anyone who stored the old implicit default; respect explicit choices.
+        if settings.autonomy == .droidDefault {
+            settings.autonomy = .high
+            suite.set(settings.autonomy.rawValue, forKey: "autonomy")
         }
         if let cwd = suite.string(forKey: "workingDirectory"), !cwd.isEmpty {
             settings.workingDirectory = cwd

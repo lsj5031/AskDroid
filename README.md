@@ -57,7 +57,7 @@ All optional. Blank means “use Droid’s own defaults.”
 
 AskDroid looks for `droid` on `PATH`, then in `~/.local/bin`, mise shims, and Homebrew.
 
-Default autonomy is Droid’s read-only mode. AskDroid does not raise this for you. Raise it in Settings only when the question needs edits or commands. Permission prompts are auto-declined unless you raise autonomy.
+Default autonomy is **high**: Droid can edit files, run commands, and push, scoped to the working directory (which defaults to a sandboxed workspace under Application Support). Choose Read-only in Settings to disable tools. Any permission prompt that still appears is auto-declined.
 
 ## Tests
 
