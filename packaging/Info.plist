@@ -26,6 +26,8 @@
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>AskDroid connects to Droid model servers on your local network, for example a local MLX server.</string>
     <key>NSHumanReadableCopyright</key>
     <string>AskDroid</string>
     <key>NSPrincipalClass</key>

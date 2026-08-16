@@ -278,11 +278,7 @@ final class AskSession: ObservableObject {
             durationText = AnswerArchive.formatDuration(result.duration)
             if answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 activity = "Droid ended the turn with no answer"
-                if settings.autonomy == .off {
-                    errorMessage = "Droid produced no text. In read-only mode every tool call is auto-rejected, so Droid may have had nothing to say. Try rephrasing, or raise autonomy in Settings."
-                } else {
-                    errorMessage = "Droid ended the turn without writing an answer. The activity log shows what happened."
-                }
+                errorMessage = emptyAnswerMessage()
                 phase = .failed
                 AskLog.line("run \(runID.uuidString.prefix(8)) completed with empty answer")
                 notifyIfCollapsed(success: false)
@@ -301,6 +297,17 @@ final class AskSession: ObservableObject {
             AskLog.line("run \(runID.uuidString.prefix(8)) failed: \(message)")
             notifyIfCollapsed(success: false)
         }
+    }
+
+    private func emptyAnswerMessage() -> String {
+        let log = runLog.joined(separator: "\n").lowercased()
+        if log.contains("connection error") {
+            return "Droid hit a connection error and couldn't reach the model. If you use a local or network model, make sure AskDroid has Local Network permission in System Settings → Privacy & Security → Local Network, then try again."
+        }
+        if settings.autonomy == .off {
+            return "Droid produced no text. In read-only mode every tool call is auto-rejected, so Droid may have had nothing to say. Try rephrasing, or raise autonomy in Settings."
+        }
+        return "Droid ended the turn without writing an answer. Open Activity to see what happened, then try again."
     }
 
     private func appendLog(_ text: String) {
