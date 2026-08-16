@@ -360,6 +360,29 @@ final class NotchMetricsTests: XCTestCase {
         XCTAssertGreaterThan(NotchMetrics.marketing.notchWidth, 100)
     }
 
+    func testNotchFrameUsesMeasuredEdgesNotAssumedCentering() {
+        // Asymmetric ears: the lens is not at screen midX, and the frame must
+        // be measured from the ear edges instead of centered.
+        let screen = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let visible = CGRect(x: 0, y: 0, width: 1512, height: 944)
+        let metrics = NotchMetrics.from(
+            screenFrame: screen,
+            visibleFrame: visible,
+            auxiliaryTopLeft: 700,
+            auxiliaryTopRight: 600,
+            safeAreaTop: 32
+        )
+        XCTAssertTrue(metrics.hasNotch)
+        XCTAssertEqual(metrics.notchLeftEdge, 700, accuracy: 0.5)
+        XCTAssertEqual(metrics.notchFrame.minX, 700, accuracy: 0.5)
+        XCTAssertEqual(metrics.notchFrame.width, 212, accuracy: 0.5)
+        XCTAssertEqual(metrics.notchFrame.midX, 806, accuracy: 0.5)
+        XCTAssertNotEqual(metrics.notchFrame.midX, screen.midX, accuracy: 0.5)
+
+        let compact = metrics.frame(for: metrics.compactSize, expanded: false)
+        XCTAssertEqual(compact.minX, metrics.notchFrame.minX - metrics.compactLeadingWidth, accuracy: 0.5)
+    }
+
     func testMenuBarSafeAreaIsNotANotch() {
         XCTAssertFalse(NotchMetrics.looksLikeHardwareNotch(
             left: 12, right: 12, safeAreaTop: 24, screenWidth: 1920
