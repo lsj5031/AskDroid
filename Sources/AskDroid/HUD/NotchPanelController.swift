@@ -14,6 +14,8 @@ final class NotchPanelController {
     private var lastLoggedScreen = ""
     private var hoverTask: Task<Void, Never>?
     private var capturePrivacy: CapturePrivacy?
+    private var metricsOverride: NotchMetrics?
+    private var suppressFrameAnimation = false
 
     var debugDescription: String {
         let responder = String(describing: type(of: panel.firstResponder ?? NSNull()))
@@ -186,8 +188,52 @@ final class NotchPanelController {
         return fallback
     }
 
+    func useMarketingNotchForScreenshots() {
+        metricsOverride = .marketing
+        suppressFrameAnimation = true
+    }
+
+    func snapshotPNG() -> Data? {
+        panel.displayIfNeeded()
+        chrome.layoutSubtreeIfNeeded()
+        hosting.layoutSubtreeIfNeeded()
+        let bounds = chrome.bounds
+        guard bounds.width > 2, bounds.height > 2,
+              let hud = chrome.bitmapImageRepForCachingDisplay(in: bounds)
+        else { return nil }
+        chrome.cacheDisplay(in: bounds, to: hud)
+
+        let pad: CGFloat = 28
+        let canvas = NSSize(width: bounds.width + pad * 2, height: bounds.height + pad * 2)
+        let scale = max(panel.backingScaleFactor, 2)
+        guard let paper = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: Int((canvas.width * scale).rounded()),
+            pixelsHigh: Int((canvas.height * scale).rounded()),
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ) else { return nil }
+        paper.size = canvas
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: paper)
+        NSColor(calibratedWhite: 0.82, alpha: 1).setFill()
+        NSBezierPath(rect: NSRect(origin: .zero, size: canvas)).fill()
+        hud.draw(in: NSRect(x: pad, y: pad, width: bounds.width, height: bounds.height))
+        NSGraphicsContext.restoreGraphicsState()
+        return paper.representation(using: .png, properties: [:])
+    }
+
     private func currentMetrics() -> NotchMetrics {
-        NotchMetrics.from(screen: targetScreen())
+        let screen = targetScreen()
+        if let metricsOverride {
+            return metricsOverride.placed(on: screen)
+        }
+        return NotchMetrics.from(screen: screen)
     }
 
     private func contentHeight() -> CGFloat {
@@ -209,7 +255,7 @@ final class NotchPanelController {
 
     private func applySize(_ size: CGSize) {
         let screen = targetScreen()
-        let metrics = NotchMetrics.from(screen: screen)
+        let metrics = currentMetrics()
         hosting.rootView = HUDRootView(session: session, metrics: metrics)
         var next = metrics.frame(for: CGSize(width: size.width.rounded(), height: size.height.rounded()), expanded: session.isExpanded)
         if !screen.frame.intersects(next) {
@@ -252,6 +298,10 @@ final class NotchPanelController {
     }
 
     private func animateFrame(to next: NSRect) {
+        if suppressFrameAnimation {
+            panel.setFrame(next, display: true)
+            return
+        }
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         NSAnimationContext.runAnimationGroup { context in
             if reduceMotion {

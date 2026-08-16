@@ -19,6 +19,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         let controller = NotchPanelController(session: session)
         panel = controller
         registerHotkey()
+
+        if let directory = ProcessInfo.processInfo.environment["ASKDROID_SCREENSHOTS"], !directory.isEmpty {
+            ScreenshotStudio.bind(controller)
+            Task { @MainActor in
+                await ScreenshotStudio.run(
+                    session: session,
+                    panel: controller,
+                    directory: URL(fileURLWithPath: directory, isDirectory: true)
+                )
+                NSApp.terminate(nil)
+            }
+            return
+        }
+
         session.present()
         controller.pinToCurrentScreen()
         controller.updateVisibility()

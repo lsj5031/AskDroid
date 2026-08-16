@@ -353,6 +353,12 @@ final class NotchMetricsTests: XCTestCase {
         XCTAssertEqual(compact.midX, visible.midX, accuracy: 0.5)
         XCTAssertEqual(metrics.compactSize.width, Theme.pillWidth)
     }
+
+    func testMarketingMetricsAreNotched() {
+        XCTAssertTrue(NotchMetrics.marketing.hasNotch)
+        XCTAssertEqual(NotchMetrics.marketing.notchHeight, 32)
+        XCTAssertGreaterThan(NotchMetrics.marketing.notchWidth, 100)
+    }
 }
 
 final class CapturePrivacyTests: XCTestCase {

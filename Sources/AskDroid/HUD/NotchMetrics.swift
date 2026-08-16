@@ -12,6 +12,23 @@ struct NotchMetrics: Equatable, Sendable {
 
     static let fallbackNotchWidth: CGFloat = 300
 
+    /// 14-inch MacBook-style notch used for README captures so the Island
+    /// silhouette is visible even on a non-notched display.
+    static let marketing = NotchMetrics.from(
+        screenFrame: CGRect(x: 0, y: 0, width: 1512, height: 982),
+        visibleFrame: CGRect(x: 0, y: 0, width: 1512, height: 944),
+        auxiliaryTopLeft: 650,
+        auxiliaryTopRight: 650,
+        safeAreaTop: 32
+    )
+
+    func placed(on screen: NSScreen) -> NotchMetrics {
+        var copy = self
+        copy.screenFrame = screen.frame
+        copy.visibleFrame = screen.visibleFrame
+        return copy
+    }
+
     var notchFrame: CGRect {
         CGRect(
             x: screenFrame.midX - notchWidth / 2,

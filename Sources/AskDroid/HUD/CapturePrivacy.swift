@@ -23,8 +23,17 @@ final class CapturePrivacy {
         "com.apple.Screenshot",
     ]
 
+    static var isDisabled: Bool {
+        let env = ProcessInfo.processInfo.environment
+        return env["ASKDROID_ALLOW_CAPTURE"] == "1" || env["ASKDROID_SCREENSHOTS"] != nil
+    }
+
     init(panel: NSWindow) {
         self.panel = panel
+        if Self.isDisabled {
+            panel.sharingType = .readWrite
+            return
+        }
         panel.sharingType = .none
         start()
     }
