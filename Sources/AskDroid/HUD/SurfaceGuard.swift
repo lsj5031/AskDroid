@@ -123,11 +123,10 @@ final class SurfaceGuard {
     }
 
     private func timedHideExpired() {
-        guard let hideUntil, Date() >= hideUntil else {
-            refresh()
-            return
-        }
-        self.hideUntil = nil
+        // The restore task always wakes at or after the latest hideUntil:
+        // scheduleTimedRestore cancels any prior task and re-arms with the
+        // current deadline, so there is no early-wake path here.
+        hideUntil = nil
         refresh()
     }
 
