@@ -23,6 +23,27 @@ final class CapturePrivacy {
         "com.apple.Screenshot",
     ]
 
+    /// Recorders / meeting apps that commonly use ScreenCaptureKit, which
+    /// ignores `sharingType` on macOS 15+. Hide while they are frontmost.
+    nonisolated static let recorderBundleIDs: Set<String> = [
+        "com.apple.QuickTimePlayerX",
+        "com.apple.replayd",
+        "com.apple.ControlCenter",
+        "us.zoom.xos",
+        "com.microsoft.teams2",
+        "com.microsoft.teams",
+        "com.tinyspeck.slackmacgap",
+        "com.hnc.Discord",
+        "com.obsproject.obs-studio",
+        "com.loom.desktop",
+        "com.raycast.macos",
+    ]
+
+    nonisolated static func shouldHideForBundle(_ id: String?) -> Bool {
+        guard let id else { return false }
+        return screenshotBundleIDs.contains(id) || recorderBundleIDs.contains(id)
+    }
+
     static var isDisabled: Bool {
         let env = ProcessInfo.processInfo.environment
         return env["ASKDROID_ALLOW_CAPTURE"] == "1" || env["ASKDROID_SCREENSHOTS"] != nil
@@ -52,14 +73,15 @@ final class CapturePrivacy {
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown, handler: handler)
 
         workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didLaunchApplicationNotification,
+            forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
             queue: .main
         ) { [weak self] note in
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-            guard let id = app?.bundleIdentifier, Self.screenshotBundleIDs.contains(id) else { return }
+            guard Self.shouldHideForBundle(app?.bundleIdentifier) else { return }
+            let isShot = Self.screenshotBundleIDs.contains(app?.bundleIdentifier ?? "")
             Task { @MainActor in
-                self?.hideForCapture(duration: 8)
+                self?.hideForCapture(duration: isShot ? 8 : 4)
             }
         }
     }

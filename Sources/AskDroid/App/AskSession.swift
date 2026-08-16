@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ServiceManagement
 import UserNotifications
 
 @MainActor
@@ -357,18 +358,16 @@ final class AskSession: ObservableObject {
 
 enum LaunchAtLogin {
     static var isEnabled: Bool {
-        guard #available(macOS 13.0, *) else { return false }
-        return SMAppService.mainApp.status == .enabled
+        SMAppService.mainApp.status == .enabled
     }
 
     @discardableResult
     static func setEnabled(_ enabled: Bool) -> Bool {
-        guard #available(macOS 13.0, *) else { return false }
         do {
             if enabled {
-                try SMAppServiceAdapter.register()
+                try SMAppService.mainApp.register()
             } else {
-                try SMAppServiceAdapter.unregister()
+                try SMAppService.mainApp.unregister()
             }
             return true
         } catch {
@@ -376,34 +375,6 @@ enum LaunchAtLogin {
             AskLog.line("launch-at-login failed: \(error.localizedDescription)")
             return false
         }
-    }
-}
-
-enum SMAppServiceAdapter {
-    static func register() throws {
-        if #available(macOS 13.0, *) {
-            try ServiceManagementBridge.register()
-        }
-    }
-
-    static func unregister() throws {
-        if #available(macOS 13.0, *) {
-            try ServiceManagementBridge.unregister()
-        }
-    }
-}
-
-import ServiceManagement
-
-enum ServiceManagementBridge {
-    @available(macOS 13.0, *)
-    static func register() throws {
-        try SMAppService.mainApp.register()
-    }
-
-    @available(macOS 13.0, *)
-    static func unregister() throws {
-        try SMAppService.mainApp.unregister()
     }
 }
 

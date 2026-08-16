@@ -359,6 +359,40 @@ final class NotchMetricsTests: XCTestCase {
         XCTAssertEqual(NotchMetrics.marketing.notchHeight, 32)
         XCTAssertGreaterThan(NotchMetrics.marketing.notchWidth, 100)
     }
+
+    func testMenuBarSafeAreaIsNotANotch() {
+        XCTAssertFalse(NotchMetrics.looksLikeHardwareNotch(
+            left: 12, right: 12, safeAreaTop: 24, screenWidth: 1920
+        ))
+        XCTAssertFalse(NotchMetrics.looksLikeHardwareNotch(
+            left: 650, right: 650, safeAreaTop: 8, screenWidth: 1512
+        ))
+        XCTAssertTrue(NotchMetrics.looksLikeHardwareNotch(
+            left: 650, right: 650, safeAreaTop: 32, screenWidth: 1512
+        ))
+    }
+}
+
+final class DisplayOccupationTests: XCTestCase {
+    func testForeignFullscreenIgnoresOurPID() {
+        let screen = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        XCTAssertFalse(DisplayOccupation.isForeignFullscreen(
+            bounds: screen, screen: screen, layer: 0, ownerPID: 42, ourPID: 42
+        ))
+        XCTAssertTrue(DisplayOccupation.isForeignFullscreen(
+            bounds: screen, screen: screen, layer: 0, ownerPID: 99, ourPID: 42
+        ))
+        XCTAssertFalse(DisplayOccupation.isForeignFullscreen(
+            bounds: CGRect(x: 0, y: 0, width: 400, height: 300),
+            screen: screen, layer: 0, ownerPID: 99, ourPID: 42
+        ))
+    }
+}
+
+final class LaunchContextTests: XCTestCase {
+    func testMissingAppleEventIsNotLogin() {
+        XCTAssertFalse(LaunchContext.isLoginLaunch(event: nil))
+    }
 }
 
 final class CapturePrivacyTests: XCTestCase {
@@ -369,6 +403,13 @@ final class CapturePrivacyTests: XCTestCase {
         XCTAssertFalse(CapturePrivacy.isScreenshotChord(keyCode: 20, flags: [.command]))
         XCTAssertFalse(CapturePrivacy.isScreenshotChord(keyCode: 20, flags: [.command, .shift, .option]))
         XCTAssertFalse(CapturePrivacy.isScreenshotChord(keyCode: 0, flags: [.command, .shift]))
+    }
+
+    func testRecorderBundlesAreDetected() {
+        XCTAssertTrue(CapturePrivacy.shouldHideForBundle("us.zoom.xos"))
+        XCTAssertTrue(CapturePrivacy.shouldHideForBundle("com.apple.screencaptureui"))
+        XCTAssertFalse(CapturePrivacy.shouldHideForBundle("com.apple.Safari"))
+        XCTAssertFalse(CapturePrivacy.shouldHideForBundle(nil))
     }
 }
 

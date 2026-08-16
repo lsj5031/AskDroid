@@ -52,9 +52,13 @@ struct CompactPill: View {
             }
             .padding(.leading, 10)
             .frame(width: metrics.compactLeadingWidth, alignment: .leading)
+            .frame(maxHeight: .infinity)
+            .background(Theme.pillFill)
 
-            Color.clear
+            Color.black
                 .frame(width: metrics.notchWidth)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
 
             Group {
                 if session.phase == .running {
@@ -69,9 +73,18 @@ struct CompactPill: View {
             }
             .frame(width: metrics.compactTrailingWidth, alignment: .trailing)
             .padding(.trailing, 10)
+            .frame(maxHeight: .infinity)
+            .background(Theme.pillFill)
         }
         .frame(height: metrics.compactSize.height)
         .background(Color.black)
+        .overlay {
+            NotchShape(
+                topCornerRadius: NotchRadii.compact.top,
+                bottomCornerRadius: NotchRadii.compact.bottom
+            )
+            .stroke(Theme.hairline, lineWidth: 1)
+        }
         .clipShape(NotchShape(
             topCornerRadius: NotchRadii.compact.top,
             bottomCornerRadius: NotchRadii.compact.bottom

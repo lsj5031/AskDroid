@@ -16,4 +16,10 @@ enum Theme {
     static let pillHeight: CGFloat = 34
     static let panelCorner: CGFloat = 18
     static let pillCorner: CGFloat = 17
+
+    static let settingsContentHeight: CGFloat = 560
+    static let composerContentHeight: CGFloat = 280
+    static let imageStripHeight: CGFloat = 72
+    static let answerBlockHeight: CGFloat = 220
+    static let maxExpandedHeight: CGFloat = 680
 }

@@ -46,7 +46,7 @@ struct NotchMetrics: Equatable, Sendable {
         if hasNotch {
             return CGSize(
                 width: compactLeadingWidth + notchWidth + compactTrailingWidth,
-                height: max(notchHeight, 32)
+                height: max(notchHeight, menubarHeight, 34)
             )
         }
         return CGSize(width: Theme.pillWidth, height: Theme.pillHeight)
@@ -56,8 +56,20 @@ struct NotchMetrics: Equatable, Sendable {
         let topInset = hasNotch ? notchHeight : 0
         return CGSize(
             width: Theme.panelWidth,
-            height: min(contentHeight + topInset, 680)
+            height: min(contentHeight + topInset, Theme.maxExpandedHeight)
         )
+    }
+
+    static func looksLikeHardwareNotch(
+        left: CGFloat,
+        right: CGFloat,
+        safeAreaTop: CGFloat,
+        screenWidth: CGFloat
+    ) -> Bool {
+        guard left >= 80, right >= 80 else { return false }
+        guard safeAreaTop >= 22, safeAreaTop <= 52 else { return false }
+        let width = screenWidth - left - right
+        return width >= 80 && width <= 420
     }
 
     func frame(for size: CGSize, expanded: Bool) -> CGRect {
@@ -98,7 +110,11 @@ struct NotchMetrics: Equatable, Sendable {
         safeAreaTop: CGFloat
     ) -> NotchMetrics {
         let menubarHeight = max(0, screenFrame.maxY - visibleFrame.maxY)
-        if let left = auxiliaryTopLeft, let right = auxiliaryTopRight, safeAreaTop > 0 {
+        // Require camera-housing-shaped auxiliary areas. A menu-bar-only
+        // safeAreaInset on an external display must not become an Island.
+        if let left = auxiliaryTopLeft, let right = auxiliaryTopRight,
+           looksLikeHardwareNotch(left: left, right: right, safeAreaTop: safeAreaTop, screenWidth: screenFrame.width)
+        {
             let width = screenFrame.width - left - right
             return NotchMetrics(
                 hasNotch: true,

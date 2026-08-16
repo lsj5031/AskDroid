@@ -33,10 +33,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        session.present()
-        controller.pinToCurrentScreen()
-        controller.updateVisibility()
-        AskLog.line("presented on launch \(controller.debugDescription)")
+        if LaunchContext.isLoginLaunch() {
+            AskLog.line("login launch; staying hidden")
+        } else {
+            session.present()
+            controller.pinToCurrentScreen()
+            controller.updateVisibility()
+            AskLog.line("presented on launch \(controller.debugDescription)")
+        }
 
         Publishers.CombineLatest3(session.$isExpanded, session.$phase, session.$isSettingsOpen)
             .dropFirst()
@@ -107,7 +111,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func registerHotkey() {
-        HotkeyCenter.shared.register(
+        let status = HotkeyCenter.shared.register(
             keyCode: session.settings.hotkeyKeyCode,
             modifiers: session.settings.hotkeyModifiers
         ) { [weak self] in
@@ -119,6 +123,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             self.session.toggleExpanded()
             self.panel?.updateVisibility()
             AskLog.line("after hotkey \(self.panel?.debugDescription ?? "nil")")
+        }
+        if status != noErr {
+            session.notice = "Could not exclusively register \(session.settings.hotkeyDisplay). A fallback listener is on; another app may already own that shortcut."
+            AskLog.line("hotkey register failed status=\(status)")
         }
     }
 

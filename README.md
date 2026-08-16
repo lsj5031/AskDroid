@@ -38,7 +38,11 @@ To start it at login, open the HUD, click the gear, enable **Launch at login**.
 3. While Droid works, the HUD streams the answer. Hide it and a compact pill stays beside the notch. Hover the pill to peek the panel without stealing focus; click or press the hotkey to type again.
 4. Copy the answer, or open the archived Markdown file.
 
-The HUD is hidden from screenshots and screen recordings (`NSWindow.sharingType` plus a brief hide on ⌘⇧3 / 4 / 5).
+The HUD hides from system screenshots (⌘⇧3 / 4 / 5) and sets `NSWindow.sharingType = .none`. ScreenCaptureKit recorders on macOS 15+ can still see it; AskDroid also hides while Screenshot.app or a known recorder/meeting app is frontmost. That is best-effort, not a guarantee.
+
+On login-item launch the HUD stays hidden until you press the hotkey. Opening the app from Finder or Spotlight still presents the composer.
+
+The hotkey is configurable in Settings: click the field and press a shortcut (must include ⌘, ⌃, or ⌥). If another app already owns that Carbon hotkey, AskDroid says so and keeps a fallback listener.
 
 The answer streams token by token while the activity log reports what Droid is doing — session startup, hooks, tool calls — alongside elapsed time and token counts:
 
@@ -91,7 +95,7 @@ To refresh the README captures after a HUD change:
 ./scripts/render-screenshots.sh
 ```
 
-That launches the app with `ASKDROID_SCREENSHOTS` set, seeds each surface, and writes PNGs into `docs/screenshots/`. Use `ASKDROID_ALLOW_CAPTURE=1` if you need to photograph a live session (privacy hide is on by default).
+That launches the app with `ASKDROID_SCREENSHOTS` set, seeds each surface, and writes PNGs into `docs/screenshots/` (including `notch-live.png` from a real window capture when a notched display is attached). Use `ASKDROID_ALLOW_CAPTURE=1` if you need to photograph a live session (privacy hide is on by default).
 
 ## Why not Shortcuts?
 

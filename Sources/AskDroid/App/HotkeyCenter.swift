@@ -14,7 +14,8 @@ final class HotkeyCenter {
     private var keyCode: UInt32 = AppSettings.defaultHotkeyKeyCode
     private var modifiers: UInt32 = AppSettings.defaultHotkeyModifiers
 
-    func register(keyCode: UInt32, modifiers: UInt32, handler callback: @escaping () -> Void) {
+    @discardableResult
+    func register(keyCode: UInt32, modifiers: UInt32, handler callback: @escaping () -> Void) -> OSStatus {
         unregister()
         self.callback = callback
         self.keyCode = keyCode
@@ -46,6 +47,9 @@ final class HotkeyCenter {
         let hotKeyID = EventHotKeyID(signature: OSType(0x41534B44), id: 1) // ASKD
         let registerStatus = RegisterEventHotKey(keyCode, modifiers, hotKeyID, GetEventDispatcherTarget(), 0, &hotKeyRef)
         AskLog.line("hotkey carbon install=\(installStatus) register=\(registerStatus) key=\(keyCode) mods=\(modifiers)")
+        if registerStatus != noErr {
+            AskLog.line("hotkey carbon failed; NSEvent monitors are the fallback")
+        }
 
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             DispatchQueue.main.async {
@@ -60,6 +64,7 @@ final class HotkeyCenter {
             }
             return event
         }
+        return registerStatus
     }
 
     func unregister() {
