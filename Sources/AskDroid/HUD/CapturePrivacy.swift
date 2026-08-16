@@ -13,6 +13,7 @@ final class CapturePrivacy {
     private var workspaceObserver: NSObjectProtocol?
     private var hideUntil: Date?
     private var restoreTask: Task<Void, Never>?
+    private var suppressedBundleID: String?
     private(set) var isCaptureHidden = false
 
     var onHideChanged: ((Bool) -> Void)?
@@ -78,10 +79,8 @@ final class CapturePrivacy {
             queue: .main
         ) { [weak self] note in
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-            guard Self.shouldHideForBundle(app?.bundleIdentifier) else { return }
-            let isShot = Self.screenshotBundleIDs.contains(app?.bundleIdentifier ?? "")
             Task { @MainActor in
-                self?.hideForCapture(duration: isShot ? 8 : 4)
+                self?.handleActivation(app?.bundleIdentifier)
             }
         }
     }
@@ -107,31 +106,61 @@ final class CapturePrivacy {
 
     func hideForCapture(duration: TimeInterval) {
         let until = Date().addingTimeInterval(duration)
-        if let hideUntil, until < hideUntil { return }
-        hideUntil = until
-        if !isCaptureHidden {
-            isCaptureHidden = true
-            panel?.orderOut(nil)
-            onHideChanged?(true)
-            AskLog.line("capture hide")
+        if let hideUntil, until < hideUntil {
+            // A later timed restore is already pending; keep it.
+        } else {
+            hideUntil = until
         }
+        refresh()
+        scheduleTimedRestore()
+    }
+
+    private func handleActivation(_ bundleID: String?) {
+        if let bundleID, Self.shouldHideForBundle(bundleID) {
+            suppressedBundleID = bundleID
+        } else if suppressedBundleID != nil {
+            // The capture app resigned; stop hiding for it.
+            suppressedBundleID = nil
+        }
+        refresh()
+    }
+
+    private func scheduleTimedRestore() {
         restoreTask?.cancel()
+        guard let hideUntil else { return }
+        let delay = max(hideUntil.timeIntervalSinceNow, 0.2)
         restoreTask = Task { [weak self] in
-            let nanos = UInt64(max(duration, 0.2) * 1_000_000_000)
-            try? await Task.sleep(nanoseconds: nanos)
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard !Task.isCancelled else { return }
             await MainActor.run {
-                self?.restoreIfDue()
+                self?.timedHideExpired()
             }
         }
     }
 
-    private func restoreIfDue() {
-        guard isCaptureHidden else { return }
-        if let hideUntil, Date() < hideUntil { return }
-        isCaptureHidden = false
-        hideUntil = nil
-        onHideChanged?(false)
-        AskLog.line("capture restore")
+    private func timedHideExpired() {
+        guard let hideUntil, Date() >= hideUntil else {
+            refresh()
+            return
+        }
+        self.hideUntil = nil
+        refresh()
+    }
+
+    /// Hides while either condition is active: a timed chord capture, or a
+    /// screenshot/recorder app being frontmost. Restores only once both clear.
+    private func refresh() {
+        let timedActive = hideUntil.map { Date() < $0 } ?? false
+        let shouldHide = timedActive || suppressedBundleID != nil
+        if shouldHide, !isCaptureHidden {
+            isCaptureHidden = true
+            panel?.orderOut(nil)
+            onHideChanged?(true)
+            AskLog.line("capture hide")
+        } else if !shouldHide, isCaptureHidden {
+            isCaptureHidden = false
+            onHideChanged?(false)
+            AskLog.line("capture restore")
+        }
     }
 }
