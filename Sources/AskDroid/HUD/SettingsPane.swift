@@ -5,7 +5,15 @@ struct SettingsPane: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            field("Hotkey", value: session.settings.hotkeyDisplay)
+            labeled("Hotkey") {
+                HotkeyRecorder(
+                    keyCode: $session.settings.hotkeyKeyCode,
+                    modifiers: $session.settings.hotkeyModifiers
+                )
+            }
+            Text("Click the field, then hold the modifiers and press a key. Needs ⌘, ⌃, or ⌥.")
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.mute)
             labeled("Model override") {
                 TextField("Leave blank for Droid default", text: $session.settings.modelOverride)
                     .textFieldStyle(.plain)
@@ -73,15 +81,6 @@ struct SettingsPane: View {
         }
         .foregroundStyle(Theme.ink)
         .font(.system(size: 13))
-    }
-
-    private func field(_ title: String, value: String) -> some View {
-        labeled(title) {
-            Text(value)
-                .padding(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Theme.well, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-        }
     }
 
     private func labeled<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {

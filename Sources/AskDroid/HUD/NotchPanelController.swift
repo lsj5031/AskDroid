@@ -16,6 +16,11 @@ final class NotchPanelController {
     private var capturePrivacy: CapturePrivacy?
     private var metricsOverride: NotchMetrics?
     private var suppressFrameAnimation = false
+    private var lastMetrics: NotchMetrics?
+    private var lastAppliedSize: CGSize?
+    private var wasExpanded = false
+    private var mouseMonitor: Any?
+    private var spaceObservers: [NSObjectProtocol] = []
 
     var debugDescription: String {
         let responder = String(describing: type(of: panel.firstResponder ?? NSNull()))
@@ -89,6 +94,9 @@ final class NotchPanelController {
         chrome.onHoverChanged = { [weak self] hovering in
             self?.handleHover(hovering)
         }
+        chrome.clickThroughGap = { [weak self] point in
+            self?.isCameraGap(point) ?? false
+        }
 
         let privacy = CapturePrivacy(panel: panel)
         privacy.onHideChanged = { [weak self] hidden in
@@ -96,6 +104,22 @@ final class NotchPanelController {
             self.updateVisibility()
         }
         self.capturePrivacy = privacy
+
+        mouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDown]) { [weak self] _ in
+            Task { @MainActor in
+                self?.syncClickThrough()
+            }
+        }
+
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.activeSpaceDidChangeNotification, NSWorkspace.didActivateApplicationNotification] {
+            let token = workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in
+                    self?.updateVisibility()
+                }
+            }
+            spaceObservers.append(token)
+        }
 
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
@@ -110,7 +134,13 @@ final class NotchPanelController {
     func pinToCurrentScreen() {
         let screen = screenUnderMouse() ?? NSScreen.main ?? NSScreen.screens.first
         guard let screen else { return }
+        pinToScreen(screen)
+    }
+
+    func pinToScreen(_ screen: NSScreen) {
         pinnedDisplayID = displayID(of: screen)
+        lastMetrics = nil
+        lastAppliedSize = nil
         AskLog.line("pin screen=\(screen.localizedName) id=\(pinnedDisplayID ?? 0)")
     }
 
@@ -119,10 +149,21 @@ final class NotchPanelController {
             panel.orderOut(nil)
             return
         }
-        if session.isExpanded {
-            showExpanded()
+        if !CapturePrivacy.isDisabled, DisplayOccupation.frontmostCovers(targetScreen()) {
+            panel.orderOut(nil)
+            AskLog.line("hide for fullscreen")
             return
         }
+        if session.isExpanded {
+            // Steal focus only when the surface transitions to expanded, i.e. the
+            // user actually summoned it. Phase changes (running → completed) while
+            // already open must not yank focus away from whatever they're doing.
+            let newlyExpanded = !wasExpanded
+            wasExpanded = true
+            showExpanded(shouldStealFocus: newlyExpanded)
+            return
+        }
+        wasExpanded = false
         if session.phase == .running || session.phase == .completed || session.phase == .failed {
             showPill()
         } else {
@@ -134,10 +175,10 @@ final class NotchPanelController {
         applySize(measuredSize())
     }
 
-    private func showExpanded() {
+    private func showExpanded(shouldStealFocus: Bool = true) {
         applySize(measuredSize())
         panel.alphaValue = 1
-        if session.presentSource == .user {
+        if shouldStealFocus, session.presentSource == .user {
             stealFocus()
             focusEditorSoon()
         } else {
@@ -193,6 +234,16 @@ final class NotchPanelController {
         suppressFrameAnimation = true
     }
 
+    func useHardwareNotch() {
+        metricsOverride = nil
+        lastMetrics = nil
+        lastAppliedSize = nil
+    }
+
+    var windowNumber: Int { panel.windowNumber }
+
+    func screenFrameForCapture() -> NSRect { panel.frame }
+
     func snapshotPNG() -> Data? {
         panel.displayIfNeeded()
         chrome.layoutSubtreeIfNeeded()
@@ -237,10 +288,10 @@ final class NotchPanelController {
     }
 
     private func contentHeight() -> CGFloat {
-        var height: CGFloat = session.isSettingsOpen ? 560 : 280
-        if !session.images.isEmpty { height += 72 }
+        var height: CGFloat = session.isSettingsOpen ? Theme.settingsContentHeight : Theme.composerContentHeight
+        if !session.images.isEmpty { height += Theme.imageStripHeight }
         if !session.answer.isEmpty || !session.thinking.isEmpty || !session.runLog.isEmpty || session.phase == .running || session.phase == .failed {
-            height += 220
+            height += Theme.answerBlockHeight
         }
         return height
     }
@@ -256,7 +307,19 @@ final class NotchPanelController {
     private func applySize(_ size: CGSize) {
         let screen = targetScreen()
         let metrics = currentMetrics()
-        hosting.rootView = HUDRootView(session: session, metrics: metrics)
+        let metricsChanged = metrics != lastMetrics
+        let sizeChanged = size != lastAppliedSize
+        // Repositioning is wired to streamed state (run log, answer, images), so it
+        // fires far more often than the geometry actually changes. Rebuilding the
+        // SwiftUI root view on every event recreates the prompt NSTextView, losing
+        // cursor/undo state and re-stealing focus, so only touch the tree when the
+        // metrics or measured size genuinely moved.
+        guard metricsChanged || sizeChanged else { return }
+
+        if metricsChanged {
+            lastMetrics = metrics
+            hosting.rootView = HUDRootView(session: session, metrics: metrics)
+        }
         var next = metrics.frame(for: CGSize(width: size.width.rounded(), height: size.height.rounded()), expanded: session.isExpanded)
         if !screen.frame.intersects(next) {
             next.origin.x = screen.frame.midX - next.width / 2
@@ -266,11 +329,48 @@ final class NotchPanelController {
         hosting.frame = chrome.bounds
         panel.hasShadow = !metrics.hasNotch
         animateFrame(to: next)
+        lastAppliedSize = size
         let screenName = screen.localizedName
         if next != lastLoggedFrame || screenName != lastLoggedScreen {
             lastLoggedFrame = next
             lastLoggedScreen = screenName
             AskLog.line("place frame=\(next) notch=\(metrics.hasNotch) screen=\(screenName)")
+        }
+    }
+
+    private func isCameraGap(_ point: NSPoint) -> Bool {
+        guard !session.isExpanded else { return false }
+        let metrics = currentMetrics()
+        guard metrics.hasNotch else { return false }
+        let gap = NSRect(
+            x: metrics.compactLeadingWidth,
+            y: 0,
+            width: metrics.notchWidth,
+            height: panel.frame.height
+        )
+        return gap.contains(point)
+    }
+
+    private func syncClickThrough() {
+        guard panel.isVisible, !session.isExpanded else {
+            if panel.ignoresMouseEvents { panel.ignoresMouseEvents = false }
+            return
+        }
+        let metrics = currentMetrics()
+        guard metrics.hasNotch else {
+            panel.ignoresMouseEvents = false
+            return
+        }
+        let mouse = NSEvent.mouseLocation
+        let gap = NSRect(
+            x: panel.frame.minX + metrics.compactLeadingWidth,
+            y: panel.frame.minY,
+            width: metrics.notchWidth,
+            height: panel.frame.height
+        )
+        let overGap = gap.contains(mouse)
+        if panel.ignoresMouseEvents != overGap {
+            panel.ignoresMouseEvents = overGap
         }
     }
 
@@ -358,7 +458,13 @@ final class NotchPanelController {
 final class HUDChromeView: NSView {
     var onDropPasteboard: ((NSPasteboard) -> Bool)?
     var onHoverChanged: ((Bool) -> Void)?
+    var clickThroughGap: ((NSPoint) -> Bool)?
     private var tracking: NSTrackingArea?
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        if clickThroughGap?(point) == true { return nil }
+        return super.hitTest(point)
+    }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()

@@ -26,14 +26,14 @@ SF Pro only. 15 pt composer, 14 pt answer, 13 pt chrome, 12 pt buttons, 11 pt me
 
 ## Components
 
-- Compact pill: 280 × 34 capsule under the notch while a run is live and the panel is hidden.
-- Expanded panel: 560 pt wide, 18 pt continuous corners, header / composer / answer / footer.
+- Compact pill: leading and trailing wings beside the camera housing (charcoal `#141416` + hairline) while a run is live. The gap under the lens stays black and click-through. Non-notch displays use a 280 × 34 floating capsule.
+- Expanded panel: 560 pt wide, Island silhouette (top radius 12, bottom 18), black notch band, then header / composer / answer / footer on panel fill.
 - Primary action: amber capsule. Secondary: well capsule.
 - Status dot: 8 pt, amber pulse while running.
 
 ## Motion
 
-180 ms ease-out expand from the notch. Status-dot pulse only, and it honors Reduce Motion.
+Jelly spring on expand/collapse (mass 0.62, stiffness 210, damping 15.5) with a vertical squash / horizontal stretch pulse, anchored at the notch. Reduce Motion is a 120 ms ease-out with no squash. Hover-peek uses a slightly stiffer spring. Status-dot pulse honors Reduce Motion.
 
 ## Surfaces
 

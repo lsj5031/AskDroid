@@ -28,8 +28,8 @@ enum ScreenshotStudio {
             session.answer = "A notch HUD is a heads-up display overlay that renders UI in and around the camera notch cutout at the top of a screen, most commonly on MacBoo"
             session.runLog = [
                 "Looking for the droid CLI…",
-                "Using /Users/liu/.local/bin/droid",
-                "cwd /Users/liu/Library/Application Support/AskDroid/workspace",
+                "Using ~/.local/bin/droid",
+                "cwd ~/Library/Application Support/AskDroid/workspace",
                 "initialize_session sent",
                 "No MCP servers configured",
                 "Session settings loaded",
@@ -49,8 +49,8 @@ enum ScreenshotStudio {
             session.archiveURL = URL(fileURLWithPath: "/tmp/droid-demo.md")
             session.runLog = [
                 "Looking for the droid CLI…",
-                "Using /Users/liu/.local/bin/droid",
-                "cwd /Users/liu/Library/Application Support/AskDroid/workspace",
+                "Using ~/.local/bin/droid",
+                "cwd ~/Library/Application Support/AskDroid/workspace",
             ]
         }
 
@@ -71,7 +71,41 @@ enum ScreenshotStudio {
             session.runLog = []
         }
 
+        await captureLiveIfPossible(session: session, directory: directory)
         AskLog.line("screenshots written to \(directory.path)")
+    }
+
+    private static func captureLiveIfPossible(session: AskSession, directory: URL) async {
+        guard let panel = activePanel() else { return }
+        let hardware = NSScreen.screens.first { NotchMetrics.from(screen: $0).hasNotch }
+        panel.useHardwareNotch()
+        if let hardware {
+            panel.pinToScreen(hardware)
+        }
+        session.resetComposer()
+        session.present(source: .user)
+        session.prompt = "Summarise what a notch HUD is in two sentences."
+        session.phase = .composing
+        session.isSettingsOpen = false
+        session.answer = ""
+        session.runLog = []
+        session.durationText = nil
+        session.tokenSummary = nil
+        session.archiveURL = nil
+        panel.updateVisibility()
+        panel.reposition()
+        try? await Task.sleep(for: .milliseconds(280))
+        let dest = directory.appendingPathComponent("notch-live.png").path
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        process.arguments = ["-l\(panel.windowNumber)", "-o", dest]
+        do {
+            try process.run()
+            process.waitUntilExit()
+            AskLog.line("live capture status=\(process.terminationStatus) \(dest)")
+        } catch {
+            AskLog.line("live capture failed: \(error.localizedDescription)")
+        }
     }
 
     private static func capture(name: String, directory: URL, mutate: () -> Void) async {
