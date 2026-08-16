@@ -35,16 +35,16 @@ To start it at login, open the HUD, click the gear, enable **Launch at login**.
 
 1. Press **⌃⌘D** from any app.
 2. Type a question. Paste or drop images. **⌘Return** asks, **Esc** hides.
-3. While Droid works, the HUD streams the answer. Hide it and a compact pill stays beside the notch. Hover the pill to peek the panel without stealing focus; click or press the hotkey to type again.
+3. While Droid works, the HUD streams the answer. Hide it and a compact pill stays beside the notch. Click the pill or press the hotkey to open it again.
 4. Copy the answer, or open the archived Markdown file.
 
-The HUD hides from system screenshots (⌘⇧3 / 4 / 5) and sets `NSWindow.sharingType = .none`. ScreenCaptureKit recorders on macOS 15+ can still see it; AskDroid also hides while Screenshot.app or a known recorder/meeting app is frontmost. That is best-effort, not a guarantee.
+The HUD sets `NSWindow.sharingType = .none` and hides the compact pill during system screenshots (⌘⇧3 / 4 / 5) and Screenshot.app. A hotkey present still shows the panel. ScreenCaptureKit recorders on macOS 15+ can still see it.
 
 On login-item launch the HUD stays hidden until you press the hotkey. Opening the app from Finder or Spotlight still presents the composer.
 
-The hotkey is configurable in Settings: click the field and press a shortcut (must include ⌘, ⌃, or ⌥). If another app already owns that Carbon hotkey, AskDroid says so and keeps a fallback listener.
+The hotkey is configurable in Settings: click the field and press a shortcut (must include ⌘, ⌃, or ⌥). If another app already owns that Carbon hotkey, AskDroid says so.
 
-The answer streams token by token while the activity log reports what Droid is doing — session startup, hooks, tool calls — alongside elapsed time and token counts:
+The answer streams token by token, with elapsed time and token counts. Session activity is behind a disclosure:
 
 <img src="docs/screenshots/progress.png" width="560" alt="AskDroid streaming an answer from the notch while the activity log shows session milestones">
 
@@ -95,7 +95,7 @@ To refresh the README captures after a HUD change:
 ./scripts/render-screenshots.sh
 ```
 
-That launches the app with `ASKDROID_SCREENSHOTS` set, seeds each surface, and writes PNGs into `docs/screenshots/` (including `notch-live.png` from a real window capture when a notched display is attached). Use `ASKDROID_ALLOW_CAPTURE=1` if you need to photograph a live session (privacy hide is on by default).
+That runs the `AskDroidScreenshots` tool (not the accessory) and writes transparent PNGs into `docs/screenshots/`.
 
 ## Why not Shortcuts?
 

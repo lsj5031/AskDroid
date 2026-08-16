@@ -403,12 +403,6 @@ final class DisplayOccupationTests: XCTestCase {
         XCTAssertFalse(DisplayOccupation.isForeignFullscreen(
             bounds: screen, screen: screen, layer: 0, ownerPID: 42, ourPID: 42
         ))
-        XCTAssertTrue(DisplayOccupation.shouldHidePassiveSurface(
-            captureHidden: true, fullscreenCovered: false, userSummoned: false
-        ))
-        XCTAssertFalse(DisplayOccupation.shouldHidePassiveSurface(
-            captureHidden: true, fullscreenCovered: true, userSummoned: true
-        ))
         XCTAssertTrue(DisplayOccupation.isForeignFullscreen(
             bounds: screen, screen: screen, layer: 0, ownerPID: 99, ourPID: 42
         ))
@@ -425,23 +419,31 @@ final class LaunchContextTests: XCTestCase {
     }
 }
 
-final class CapturePrivacyTests: XCTestCase {
+final class SurfaceGuardTests: XCTestCase {
     func testScreenshotChords() {
-        XCTAssertTrue(CapturePrivacy.isScreenshotChord(keyCode: 20, flags: [.command, .shift]))
-        XCTAssertTrue(CapturePrivacy.isScreenshotChord(keyCode: 21, flags: [.command, .shift]))
-        XCTAssertTrue(CapturePrivacy.isScreenshotChord(keyCode: 23, flags: [.command, .shift]))
-        XCTAssertFalse(CapturePrivacy.isScreenshotChord(keyCode: 20, flags: [.command]))
-        XCTAssertFalse(CapturePrivacy.isScreenshotChord(keyCode: 20, flags: [.command, .shift, .option]))
-        XCTAssertFalse(CapturePrivacy.isScreenshotChord(keyCode: 0, flags: [.command, .shift]))
+        XCTAssertTrue(SurfaceGuard.isScreenshotChord(keyCode: 20, flags: [.command, .shift]))
+        XCTAssertTrue(SurfaceGuard.isScreenshotChord(keyCode: 21, flags: [.command, .shift]))
+        XCTAssertTrue(SurfaceGuard.isScreenshotChord(keyCode: 23, flags: [.command, .shift]))
+        XCTAssertFalse(SurfaceGuard.isScreenshotChord(keyCode: 20, flags: [.command]))
+        XCTAssertFalse(SurfaceGuard.isScreenshotChord(keyCode: 20, flags: [.command, .shift, .option]))
+        XCTAssertFalse(SurfaceGuard.isScreenshotChord(keyCode: 0, flags: [.command, .shift]))
     }
 
-    func testRecorderBundlesAreDetected() {
-        XCTAssertTrue(CapturePrivacy.shouldHideForBundle("us.zoom.xos"))
-        XCTAssertTrue(CapturePrivacy.shouldHideForBundle("com.apple.screencaptureui"))
-        XCTAssertFalse(CapturePrivacy.shouldHideForBundle("com.apple.Safari"))
-        XCTAssertFalse(CapturePrivacy.shouldHideForBundle("com.apple.ControlCenter"))
-        XCTAssertFalse(CapturePrivacy.shouldHideForBundle("com.raycast.macos"))
-        XCTAssertFalse(CapturePrivacy.shouldHideForBundle(nil))
+    func testOnlyScreenshotAppsHideThePassiveSurface() {
+        XCTAssertTrue(SurfaceGuard.shouldHideForBundle("com.apple.screencaptureui"))
+        XCTAssertFalse(SurfaceGuard.shouldHideForBundle("us.zoom.xos"))
+        XCTAssertFalse(SurfaceGuard.shouldHideForBundle("com.apple.Safari"))
+        XCTAssertFalse(SurfaceGuard.shouldHideForBundle("com.apple.ControlCenter"))
+        XCTAssertFalse(SurfaceGuard.shouldHideForBundle(nil))
+    }
+
+    func testUserSummonBypassesPassiveHide() {
+        XCTAssertTrue(SurfaceGuard.shouldHidePassiveSurface(
+            captureHidden: true, fullscreenCovered: false, userSummoned: false
+        ))
+        XCTAssertFalse(SurfaceGuard.shouldHidePassiveSurface(
+            captureHidden: true, fullscreenCovered: true, userSummoned: true
+        ))
     }
 }
 
@@ -986,37 +988,14 @@ final class AskSessionTests: XCTestCase {
         XCTAssertNotNil(session.notice)
     }
 
-    func testHoverPresentDoesNotStealComposerState() {
+    func testPresentDoesNotResetCompletedPhase() {
         let session = makeSession(launcher: MockLauncher())
         session.phase = .completed
-        session.present(source: .hover)
+        session.present()
         XCTAssertTrue(session.isExpanded)
-        XCTAssertEqual(session.presentSource, .hover)
         XCTAssertEqual(session.phase, .completed)
-
-        session.dismissHoverIfNeeded()
+        session.dismiss()
         XCTAssertFalse(session.isExpanded)
         XCTAssertEqual(session.phase, .completed)
-    }
-
-    func testUserPresentIsNotDismissedByHoverLeave() {
-        let session = makeSession(launcher: MockLauncher())
-        session.present(source: .user)
-        XCTAssertEqual(session.presentSource, .user)
-        session.dismissHoverIfNeeded()
-        XCTAssertTrue(session.isExpanded)
-        session.promoteHoverToUser()
-        XCTAssertEqual(session.presentSource, .user)
-    }
-
-    func testHoverPromotesToUser() {
-        let session = makeSession(launcher: MockLauncher())
-        session.phase = .completed
-        session.present(source: .hover)
-        session.promoteHoverToUser()
-        XCTAssertEqual(session.presentSource, .user)
-        XCTAssertTrue(session.isExpanded)
-        session.dismissHoverIfNeeded()
-        XCTAssertTrue(session.isExpanded)
     }
 }

@@ -8,7 +8,6 @@ final class HotkeyCenter {
     private var hotKeyRef: EventHotKeyRef?
     private var handler: EventHandlerRef?
     private var callback: (() -> Void)?
-    private var globalMonitor: Any?
     private var localMonitor: Any?
     private var lastFire: Date = .distantPast
     private var keyCode: UInt32 = AppSettings.defaultHotkeyKeyCode
@@ -50,14 +49,9 @@ final class HotkeyCenter {
         let registerStatus = RegisterEventHotKey(keyCode, modifiers, hotKeyID, GetEventDispatcherTarget(), 0, &hotKeyRef)
         AskLog.line("hotkey carbon install=\(installStatus) register=\(registerStatus) key=\(keyCode) mods=\(modifiers)")
         if registerStatus != noErr {
-            AskLog.line("hotkey carbon failed; NSEvent monitors are the fallback")
+            AskLog.line("hotkey carbon failed; local monitor is the fallback while AskDroid is focused")
         }
 
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            DispatchQueue.main.async {
-                self?.handleMonitor(event, source: "global")
-            }
-        }
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, !self.isRecordingShortcut else { return event }
             if self.isConfiguredHotkey(event) {
@@ -78,19 +72,10 @@ final class HotkeyCenter {
             RemoveEventHandler(handler)
             self.handler = nil
         }
-        if let globalMonitor {
-            NSEvent.removeMonitor(globalMonitor)
-            self.globalMonitor = nil
-        }
         if let localMonitor {
             NSEvent.removeMonitor(localMonitor)
             self.localMonitor = nil
         }
-    }
-
-    private func handleMonitor(_ event: NSEvent, source: String) {
-        guard isConfiguredHotkey(event) else { return }
-        fire(source: source)
     }
 
     private func isConfiguredHotkey(_ event: NSEvent) -> Bool {

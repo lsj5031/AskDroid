@@ -20,19 +20,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         panel = controller
         registerHotkey()
 
-        if let directory = ProcessInfo.processInfo.environment["ASKDROID_SCREENSHOTS"], !directory.isEmpty {
-            ScreenshotStudio.bind(controller)
-            Task { @MainActor in
-                await ScreenshotStudio.run(
-                    session: session,
-                    panel: controller,
-                    directory: URL(fileURLWithPath: directory, isDirectory: true)
-                )
-                NSApp.terminate(nil)
-            }
-            return
-        }
-
         if LaunchContext.isLoginLaunch() {
             AskLog.line("login launch; staying hidden")
         } else {
@@ -125,7 +112,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             AskLog.line("after hotkey \(self.panel?.debugDescription ?? "nil")")
         }
         if status != noErr {
-            session.notice = "Could not exclusively register \(session.settings.hotkeyDisplay). A fallback listener is on; another app may already own that shortcut."
+            session.notice = "Could not exclusively register \(session.settings.hotkeyDisplay). Another app may already own that shortcut."
             AskLog.line("hotkey register failed status=\(status)")
         } else if session.notice?.contains("Could not exclusively register") == true {
             session.notice = nil
