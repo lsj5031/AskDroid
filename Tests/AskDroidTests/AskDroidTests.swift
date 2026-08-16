@@ -310,6 +310,176 @@ final class AttachedImageTests: XCTestCase {
     }
 }
 
+final class NotchMetricsTests: XCTestCase {
+    func testNotchedScreenUsesAuxiliaryAreas() {
+        let screen = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let visible = CGRect(x: 0, y: 0, width: 1512, height: 944)
+        let metrics = NotchMetrics.from(
+            screenFrame: screen,
+            visibleFrame: visible,
+            auxiliaryTopLeft: 650,
+            auxiliaryTopRight: 650,
+            safeAreaTop: 32
+        )
+        XCTAssertTrue(metrics.hasNotch)
+        XCTAssertEqual(metrics.notchWidth, 212)
+        XCTAssertEqual(metrics.notchHeight, 32)
+        XCTAssertEqual(metrics.compactSize.height, metrics.notchHeight)
+        XCTAssertEqual(metrics.notchFrame.origin.y, screen.maxY - 32)
+        XCTAssertEqual(metrics.notchFrame.midX, screen.midX, accuracy: 0.5)
+
+        let compact = metrics.frame(for: metrics.compactSize, expanded: false)
+        XCTAssertEqual(compact.maxY, screen.maxY)
+        XCTAssertEqual(compact.minX, screen.midX - metrics.notchWidth / 2 - metrics.compactLeadingWidth, accuracy: 0.5)
+
+        let expanded = metrics.frame(for: metrics.expandedSize(contentHeight: 400), expanded: true)
+        XCTAssertEqual(expanded.maxY, screen.maxY)
+        XCTAssertEqual(expanded.midX, screen.midX, accuracy: 0.5)
+        XCTAssertEqual(expanded.height, 432)
+    }
+
+    func testNonNotchedScreenFallsBackToVisibleFrame() {
+        let screen = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+        let visible = CGRect(x: 0, y: 0, width: 1920, height: 1055)
+        let metrics = NotchMetrics.from(
+            screenFrame: screen,
+            visibleFrame: visible,
+            auxiliaryTopLeft: nil,
+            auxiliaryTopRight: nil,
+            safeAreaTop: 0
+        )
+        XCTAssertFalse(metrics.hasNotch)
+        let compact = metrics.frame(for: metrics.compactSize, expanded: false)
+        XCTAssertLessThan(compact.maxY, visible.maxY + 0.1)
+        XCTAssertEqual(compact.midX, visible.midX, accuracy: 0.5)
+        XCTAssertEqual(metrics.compactSize.width, Theme.pillWidth)
+    }
+
+    func testMarketingMetricsAreNotched() {
+        XCTAssertTrue(NotchMetrics.marketing.hasNotch)
+        XCTAssertEqual(NotchMetrics.marketing.notchHeight, 32)
+        XCTAssertGreaterThan(NotchMetrics.marketing.notchWidth, 100)
+    }
+
+    func testNotchFrameUsesMeasuredEdgesNotAssumedCentering() {
+        // Asymmetric ears: the lens is not at screen midX, and the frame must
+        // be measured from the ear edges instead of centered.
+        let screen = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let visible = CGRect(x: 0, y: 0, width: 1512, height: 944)
+        let metrics = NotchMetrics.from(
+            screenFrame: screen,
+            visibleFrame: visible,
+            auxiliaryTopLeft: 700,
+            auxiliaryTopRight: 600,
+            safeAreaTop: 32
+        )
+        XCTAssertTrue(metrics.hasNotch)
+        XCTAssertEqual(metrics.notchLeftEdge, 700, accuracy: 0.5)
+        XCTAssertEqual(metrics.notchFrame.minX, 700, accuracy: 0.5)
+        XCTAssertEqual(metrics.notchFrame.width, 212, accuracy: 0.5)
+        XCTAssertEqual(metrics.notchFrame.midX, 806, accuracy: 0.5)
+        XCTAssertNotEqual(metrics.notchFrame.midX, screen.midX, accuracy: 0.5)
+
+        let compact = metrics.frame(for: metrics.compactSize, expanded: false)
+        XCTAssertEqual(compact.minX, metrics.notchFrame.minX - metrics.compactLeadingWidth, accuracy: 0.5)
+    }
+
+    func testMenuBarSafeAreaIsNotANotch() {
+        XCTAssertFalse(NotchMetrics.looksLikeHardwareNotch(
+            left: 12, right: 12, safeAreaTop: 24, screenWidth: 1920
+        ))
+        XCTAssertFalse(NotchMetrics.looksLikeHardwareNotch(
+            left: 650, right: 650, safeAreaTop: 8, screenWidth: 1512
+        ))
+        XCTAssertTrue(NotchMetrics.looksLikeHardwareNotch(
+            left: 650, right: 650, safeAreaTop: 32, screenWidth: 1512
+        ))
+    }
+}
+
+final class DisplayOccupationTests: XCTestCase {
+    func testForeignFullscreenIgnoresOurPID() {
+        let screen = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        XCTAssertFalse(DisplayOccupation.isForeignFullscreen(
+            bounds: screen, screen: screen, layer: 0, ownerPID: 42, ourPID: 42
+        ))
+        XCTAssertTrue(DisplayOccupation.isForeignFullscreen(
+            bounds: screen, screen: screen, layer: 0, ownerPID: 99, ourPID: 42
+        ))
+        XCTAssertFalse(DisplayOccupation.isForeignFullscreen(
+            bounds: CGRect(x: 0, y: 0, width: 400, height: 300),
+            screen: screen, layer: 0, ownerPID: 99, ourPID: 42
+        ))
+    }
+
+    func testSameSizeSecondDisplayIsNotFullscreen() {
+        // A fullscreen window on an identical display beside or above the
+        // pinned one must not count as covering it (width/height match).
+        let screen = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let beside = CGRect(x: 1512, y: 0, width: 1512, height: 982)
+        XCTAssertFalse(DisplayOccupation.isForeignFullscreen(
+            bounds: beside, screen: screen, layer: 0, ownerPID: 99, ourPID: 42
+        ))
+        let above = CGRect(x: 0, y: -982, width: 1512, height: 982)
+        XCTAssertFalse(DisplayOccupation.isForeignFullscreen(
+            bounds: above, screen: screen, layer: 0, ownerPID: 99, ourPID: 42
+        ))
+        // The same window positioned over this screen still counts.
+        XCTAssertTrue(DisplayOccupation.isForeignFullscreen(
+            bounds: screen, screen: screen, layer: 0, ownerPID: 99, ourPID: 42
+        ))
+    }
+
+    func testTouchingEdgeIsNotFullscreen() {
+        let screen = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let touching = CGRect(x: 1512 - 1, y: 0, width: 1512, height: 982)
+        XCTAssertFalse(DisplayOccupation.isForeignFullscreen(
+            bounds: touching, screen: screen, layer: 0, ownerPID: 99, ourPID: 42
+        ))
+    }
+}
+
+final class LaunchContextTests: XCTestCase {
+    func testMissingAppleEventIsNotLogin() {
+        XCTAssertFalse(LaunchContext.isLoginLaunch(event: nil))
+    }
+}
+
+final class SurfaceGuardTests: XCTestCase {
+    func testScreenshotChords() {
+        XCTAssertTrue(SurfaceGuard.isScreenshotChord(keyCode: 20, flags: [.command, .shift]))
+        XCTAssertTrue(SurfaceGuard.isScreenshotChord(keyCode: 21, flags: [.command, .shift]))
+        XCTAssertTrue(SurfaceGuard.isScreenshotChord(keyCode: 23, flags: [.command, .shift]))
+        XCTAssertFalse(SurfaceGuard.isScreenshotChord(keyCode: 20, flags: [.command]))
+        XCTAssertFalse(SurfaceGuard.isScreenshotChord(keyCode: 20, flags: [.command, .shift, .option]))
+        XCTAssertFalse(SurfaceGuard.isScreenshotChord(keyCode: 0, flags: [.command, .shift]))
+    }
+
+    func testOnlyScreenshotAppsHideThePassiveSurface() {
+        XCTAssertTrue(SurfaceGuard.shouldHideForBundle("com.apple.screencaptureui"))
+        XCTAssertFalse(SurfaceGuard.shouldHideForBundle("us.zoom.xos"))
+        XCTAssertFalse(SurfaceGuard.shouldHideForBundle("com.apple.Safari"))
+        XCTAssertFalse(SurfaceGuard.shouldHideForBundle("com.apple.ControlCenter"))
+        XCTAssertFalse(SurfaceGuard.shouldHideForBundle(nil))
+    }
+
+    func testUserSummonBypassesPassiveHide() {
+        XCTAssertTrue(SurfaceGuard.shouldHidePassiveSurface(
+            captureHidden: true, fullscreenCovered: false, userSummoned: false
+        ))
+        XCTAssertFalse(SurfaceGuard.shouldHidePassiveSurface(
+            captureHidden: true, fullscreenCovered: true, userSummoned: true
+        ))
+    }
+
+    func testCaptureHideDurations() {
+        XCTAssertEqual(SurfaceGuard.captureHideDuration(for: 20), 1.4) // ⌘⇧3
+        XCTAssertEqual(SurfaceGuard.captureHideDuration(for: 21), 8)   // ⌘⇧4 region selection
+        XCTAssertEqual(SurfaceGuard.captureHideDuration(for: 23), 1.4) // ⌘⇧5
+        XCTAssertEqual(SurfaceGuard.captureHideDuration(for: 0), 1.4)  // not a chord
+    }
+}
+
 final class LineReaderTests: XCTestCase {
     func testSplitsCompleteLinesAndKeepsRemainder() {
         let reader = LineReader()
@@ -849,5 +1019,16 @@ final class AskSessionTests: XCTestCase {
         XCTAssertEqual(session.images.count, 1)
         XCTAssertEqual(session.images.first?.filename, "small.png")
         XCTAssertNotNil(session.notice)
+    }
+
+    func testPresentDoesNotResetCompletedPhase() {
+        let session = makeSession(launcher: MockLauncher())
+        session.phase = .completed
+        session.present()
+        XCTAssertTrue(session.isExpanded)
+        XCTAssertEqual(session.phase, .completed)
+        session.dismiss()
+        XCTAssertFalse(session.isExpanded)
+        XCTAssertEqual(session.phase, .completed)
     }
 }

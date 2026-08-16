@@ -4,6 +4,8 @@ import UniformTypeIdentifiers
 
 struct HUDRootView: View {
     @ObservedObject var session: AskSession
+    var metrics: NotchMetrics
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Group {
@@ -15,43 +17,123 @@ struct HUDRootView: View {
                 Color.clear
             }
         }
+        .environment(\.notchMetrics, metrics)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .animation(NotchMotion.conversion(reduceMotion: reduceMotion), value: session.isExpanded)
     }
 }
 
 struct CompactPill: View {
     @ObservedObject var session: AskSession
+    @Environment(\.notchMetrics) private var metrics
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Button(action: session.present) {
-            HStack(spacing: 8) {
+            if metrics.hasNotch {
+                notchedPill
+            } else {
+                floatingPill
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(session.compactTitle)
+        .animation(NotchMotion.conversion(reduceMotion: reduceMotion), value: session.phase)
+    }
+
+    private var notchedPill: some View {
+        HStack(spacing: 0) {
+            HStack(spacing: 6) {
                 StatusDot(phase: session.phase)
                 Text(session.compactTitle)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Theme.ink)
                     .lineLimit(1)
-                Spacer(minLength: 8)
+            }
+            .padding(.leading, 10)
+            .frame(width: metrics.compactLeadingWidth, alignment: .leading)
+            .frame(maxHeight: .infinity)
+            .background(Theme.pillFill)
+
+            Color.black
+                .frame(width: metrics.notchWidth)
+                .clipShape(NotchShape(
+                    topCornerRadius: NotchMetrics.notchTopCornerRadius,
+                    bottomCornerRadius: NotchMetrics.notchBottomCornerRadius
+                ))
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+
+            Group {
                 if session.phase == .running {
                     Text(AnswerArchive.formatDuration(session.elapsed))
                         .font(.system(size: 11, weight: .medium).monospacedDigit())
                         .foregroundStyle(Theme.mute)
+                } else {
+                    Image(systemName: session.phase == .failed ? "exclamationmark" : "checkmark")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(session.phase == .failed ? Theme.danger : Theme.success)
                 }
             }
-            .padding(.horizontal, 12)
-            .frame(width: Theme.pillWidth, height: Theme.pillHeight)
-            .background(Theme.pillFill, in: Capsule())
-            .overlay(Capsule().stroke(Theme.hairline, lineWidth: 1))
+            .padding(.trailing, 10)
+            .frame(width: metrics.compactTrailingWidth, alignment: .trailing)
+            .frame(maxHeight: .infinity)
+            .background(Theme.pillFill)
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(session.compactTitle)
+        .frame(height: metrics.compactSize.height)
+        .background(Color.black)
+        .overlay {
+            NotchShape(
+                topCornerRadius: NotchRadii.compact.top,
+                bottomCornerRadius: NotchRadii.compact.bottom
+            )
+            .stroke(Theme.hairline, lineWidth: 1)
+        }
+        .clipShape(NotchShape(
+            topCornerRadius: NotchRadii.compact.top,
+            bottomCornerRadius: NotchRadii.compact.bottom
+        ))
+        .animation(NotchMotion.conversion(reduceMotion: reduceMotion), value: session.phase)
     }
+
+    private var floatingPill: some View {
+        HStack(spacing: 8) {
+            StatusDot(phase: session.phase)
+            Text(session.compactTitle)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Theme.ink)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            if session.phase == .running {
+                Text(AnswerArchive.formatDuration(session.elapsed))
+                    .font(.system(size: 11, weight: .medium).monospacedDigit())
+                    .foregroundStyle(Theme.mute)
+            }
+        }
+        .padding(.horizontal, 12)
+        .frame(width: Theme.pillWidth, height: Theme.pillHeight)
+        .background(Theme.pillFill, in: Capsule())
+        .overlay(Capsule().stroke(Theme.hairline, lineWidth: 1))
+    }
+
 }
 
 struct ExpandedHUD: View {
     @ObservedObject var session: AskSession
+    @Environment(\.notchMetrics) private var metrics
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private var showingResult: Bool {
+        session.phase == .running || session.phase == .failed || !session.answer.isEmpty
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if metrics.hasNotch {
+                Color.clear
+                    .frame(height: metrics.notchHeight)
+                    .accessibilityHidden(true)
+            }
             header
             Divider().overlay(Theme.hairline)
             if session.isSettingsOpen {
@@ -59,23 +141,41 @@ struct ExpandedHUD: View {
                     SettingsPane(session: session)
                         .padding(16)
                 }
+            } else if showingResult {
+                questionLine
+                Divider().overlay(Theme.hairline)
+                answerBlock
+                footer
             } else {
                 composer
-                if !session.answer.isEmpty || session.phase == .running || session.phase == .failed {
-                    Divider().overlay(Theme.hairline)
-                    answerBlock
-                }
-                footer
             }
         }
         .frame(width: Theme.panelWidth, alignment: .topLeading)
         .frame(maxHeight: .infinity, alignment: .top)
         .background(Theme.panelFill)
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.panelCorner, style: .continuous)
+        .overlay {
+            if metrics.hasNotch {
+                NotchShape(
+                    topCornerRadius: NotchRadii.expanded.top,
+                    bottomCornerRadius: NotchRadii.expanded.bottom
+                )
                 .stroke(Theme.hairline, lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: Theme.panelCorner, style: .continuous))
+            } else {
+                RoundedRectangle(cornerRadius: Theme.panelCorner, style: .continuous)
+                    .stroke(Theme.hairline, lineWidth: 1)
+            }
+        }
+        .mask {
+            if metrics.hasNotch {
+                NotchShape(
+                    topCornerRadius: NotchRadii.expanded.top,
+                    bottomCornerRadius: NotchRadii.expanded.bottom
+                )
+            } else {
+                RoundedRectangle(cornerRadius: Theme.panelCorner, style: .continuous)
+            }
+        }
+        .animation(NotchMotion.conversion(reduceMotion: reduceMotion), value: session.isSettingsOpen)
         .onDrop(of: [.fileURL, .image, .png, .jpeg, .tiff, .gif, UTType.webP], isTargeted: nil) { providers in
             handleDrop(providers)
         }
@@ -88,7 +188,7 @@ struct ExpandedHUD: View {
                 Text(session.isSettingsOpen ? "Settings" : "AskDroid")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Theme.ink)
-                Text(session.isSettingsOpen ? "Optional overrides. Blank uses Droid defaults." : session.activity.isEmpty ? "⌃⌘D · ⌘↩ ask · Esc hide" : session.activity)
+                Text(session.isSettingsOpen ? "Optional overrides. Blank uses Droid defaults." : session.activity.isEmpty ? "\(session.settings.hotkeyDisplay) · ⌘↩ ask · Esc hide" : session.activity)
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.mute)
                     .lineLimit(1)
@@ -103,6 +203,22 @@ struct ExpandedHUD: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
+    }
+
+    private var questionLine: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(session.prompt.isEmpty ? "Look at the attached image(s)." : session.prompt)
+                .font(.system(size: 13))
+                .foregroundStyle(Theme.mute)
+                .lineLimit(2)
+            Spacer(minLength: 8)
+            if session.phase == .running {
+                Button("Cancel", action: session.cancelRun)
+                    .buttonStyle(GhostButtonStyle())
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
     }
 
     private var composer: some View {
@@ -134,29 +250,24 @@ struct ExpandedHUD: View {
                     onSubmit: session.submit,
                     onPasteImages: { session.attachFromPasteboard() }
                 )
-                .frame(minHeight: 84, maxHeight: 140)
+                .frame(minHeight: 52, maxHeight: 88)
                 .contentShape(Rectangle())
             }
 
             if let notice = session.notice {
                 Text(notice)
                     .font(.system(size: 11))
-                    .foregroundStyle(Color(red: 1, green: 0.72, blue: 0.42))
+                    .foregroundStyle(Theme.notice)
             }
             HStack {
                 Text("Paste or drop images")
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.mute)
                 Spacer()
-                if session.phase == .running {
-                    Button("Cancel", action: session.cancelRun)
-                        .buttonStyle(GhostButtonStyle())
-                } else {
-                    Button("Ask", action: session.submit)
-                        .buttonStyle(PrimaryButtonStyle())
-                        .disabled(!session.canSubmit)
-                        .keyboardShortcut(.return, modifiers: .command)
-                }
+                Button("Ask", action: session.submit)
+                    .buttonStyle(PrimaryButtonStyle())
+                    .disabled(!session.canSubmit)
+                    .keyboardShortcut(.return, modifiers: .command)
             }
         }
         .padding(16)
@@ -168,12 +279,12 @@ struct ExpandedHUD: View {
                 if session.phase == .failed, let errorMessage = session.errorMessage {
                     Text(errorMessage)
                         .font(.system(size: 13))
-                        .foregroundStyle(Color(red: 1, green: 0.62, blue: 0.52))
+                        .foregroundStyle(Theme.dangerText)
                 }
                 if let archiveError = session.archiveError {
                     Text(archiveError)
                         .font(.system(size: 13))
-                        .foregroundStyle(Color(red: 1, green: 0.62, blue: 0.52))
+                        .foregroundStyle(Theme.dangerText)
                         .textSelection(.enabled)
                 }
                 if !session.thinking.isEmpty, session.answer.isEmpty || session.phase == .running {
@@ -192,18 +303,19 @@ struct ExpandedHUD: View {
                         .foregroundStyle(Theme.mute)
                 }
                 if !session.runLog.isEmpty {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Activity")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Theme.mute)
-                        ForEach(Array(session.runLog.suffix(20).enumerated()), id: \.offset) { _, line in
-                            Text(line)
-                                .font(.system(size: 11).monospaced())
-                                .foregroundStyle(Theme.mute)
-                                .textSelection(.enabled)
-                                .fixedSize(horizontal: false, vertical: true)
+                    DisclosureGroup("Activity") {
+                        VStack(alignment: .leading, spacing: 3) {
+                            ForEach(Array(session.runLog.suffix(20).enumerated()), id: \.offset) { _, line in
+                                Text(line)
+                                    .font(.system(size: 11).monospaced())
+                                    .foregroundStyle(Theme.mute)
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                         }
                     }
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Theme.mute)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -240,8 +352,6 @@ struct ExpandedHUD: View {
                 }
                 .buttonStyle(GhostButtonStyle())
             }
-            Button("Quit", action: session.quit)
-                .buttonStyle(GhostButtonStyle())
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -314,8 +424,8 @@ struct StatusDot: View {
     private var color: Color {
         switch phase {
         case .running: Theme.accent
-        case .completed: Color(red: 0.45, green: 0.84, blue: 0.52)
-        case .failed: Color(red: 1, green: 0.45, blue: 0.38)
+        case .completed: Theme.success
+        case .failed: Theme.danger
         default: Theme.mute
         }
     }

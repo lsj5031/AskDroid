@@ -9,6 +9,7 @@ let package = Package(
     ],
     products: [
         .executable(name: "AskDroid", targets: ["AskDroid"]),
+        .executable(name: "AskDroidScreenshots", targets: ["AskDroidScreenshots"]),
         .library(name: "AskDroidKit", targets: ["AskDroidKit"]),
     ],
     dependencies: [
@@ -26,6 +27,11 @@ let package = Package(
             name: "AskDroid",
             dependencies: ["AskDroidKit"],
             path: "Sources/AskDroidMain"
+        ),
+        .executableTarget(
+            name: "AskDroidScreenshots",
+            dependencies: ["AskDroidKit"],
+            path: "Sources/AskDroidScreenshots"
         ),
         .testTarget(
             name: "AskDroidTests",

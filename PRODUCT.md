@@ -35,7 +35,7 @@ Unlike Shortcuts wrappers (ask-pi) it is a real native surface: image paste, liv
 
 Confirmed for v1:
 - Notch-only surface (no Dock icon, no menu bar item). `LSUIElement`.
-- Global hotkey (default ⌃⌘D), configurable, Carbon `RegisterEventHotKey`.
+- Global hotkey (default ⌃⌘D), configurable in Settings via a key recorder. Carbon `RegisterEventHotKey` with an NSEvent-monitor fallback; registration failure is surfaced in the HUD.
 - One-shot conversation per question.
 - Image paste and drag-and-drop (PNG/JPEG/GIF/WebP).
 - Streamed Markdown in the expanded HUD.

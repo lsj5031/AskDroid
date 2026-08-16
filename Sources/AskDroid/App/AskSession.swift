@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import ServiceManagement
 import UserNotifications
 
 @MainActor
@@ -333,20 +334,29 @@ final class AskSession: ObservableObject {
     }
 }
 
+enum LaunchContext {
+    static let openApplicationEvent: UInt32 = 0x6F61_7070 // 'oapp'
+    static let propDataKeyword: UInt32 = 0x7072_6474 // 'prdt'
+    static let launchedAsLoginItem: UInt32 = 0x6C67_6974 // 'lgit'
+
+    static func isLoginLaunch(event: NSAppleEventDescriptor? = NSAppleEventManager.shared().currentAppleEvent) -> Bool {
+        guard let event, event.eventID == openApplicationEvent else { return false }
+        return event.paramDescriptor(forKeyword: propDataKeyword)?.enumCodeValue == launchedAsLoginItem
+    }
+}
+
 enum LaunchAtLogin {
     static var isEnabled: Bool {
-        guard #available(macOS 13.0, *) else { return false }
-        return SMAppService.mainApp.status == .enabled
+        SMAppService.mainApp.status == .enabled
     }
 
     @discardableResult
     static func setEnabled(_ enabled: Bool) -> Bool {
-        guard #available(macOS 13.0, *) else { return false }
         do {
             if enabled {
-                try SMAppServiceAdapter.register()
+                try SMAppService.mainApp.register()
             } else {
-                try SMAppServiceAdapter.unregister()
+                try SMAppService.mainApp.unregister()
             }
             return true
         } catch {
@@ -354,34 +364,6 @@ enum LaunchAtLogin {
             AskLog.line("launch-at-login failed: \(error.localizedDescription)")
             return false
         }
-    }
-}
-
-enum SMAppServiceAdapter {
-    static func register() throws {
-        if #available(macOS 13.0, *) {
-            try ServiceManagementBridge.register()
-        }
-    }
-
-    static func unregister() throws {
-        if #available(macOS 13.0, *) {
-            try ServiceManagementBridge.unregister()
-        }
-    }
-}
-
-import ServiceManagement
-
-enum ServiceManagementBridge {
-    @available(macOS 13.0, *)
-    static func register() throws {
-        try SMAppService.mainApp.register()
-    }
-
-    @available(macOS 13.0, *)
-    static func unregister() throws {
-        try SMAppService.mainApp.unregister()
     }
 }
 

@@ -8,13 +8,15 @@ final class HotkeyCenter {
     private var hotKeyRef: EventHotKeyRef?
     private var handler: EventHandlerRef?
     private var callback: (() -> Void)?
-    private var globalMonitor: Any?
     private var localMonitor: Any?
     private var lastFire: Date = .distantPast
     private var keyCode: UInt32 = AppSettings.defaultHotkeyKeyCode
     private var modifiers: UInt32 = AppSettings.defaultHotkeyModifiers
+    /// Settings recorder is capturing a new shortcut; swallow neither Esc nor the current hotkey.
+    var isRecordingShortcut = false
 
-    func register(keyCode: UInt32, modifiers: UInt32, handler callback: @escaping () -> Void) {
+    @discardableResult
+    func register(keyCode: UInt32, modifiers: UInt32, handler callback: @escaping () -> Void) -> OSStatus {
         unregister()
         self.callback = callback
         self.keyCode = keyCode
@@ -46,20 +48,19 @@ final class HotkeyCenter {
         let hotKeyID = EventHotKeyID(signature: OSType(0x41534B44), id: 1) // ASKD
         let registerStatus = RegisterEventHotKey(keyCode, modifiers, hotKeyID, GetEventDispatcherTarget(), 0, &hotKeyRef)
         AskLog.line("hotkey carbon install=\(installStatus) register=\(registerStatus) key=\(keyCode) mods=\(modifiers)")
-
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            DispatchQueue.main.async {
-                self?.handleMonitor(event, source: "global")
-            }
+        if registerStatus != noErr {
+            AskLog.line("hotkey carbon failed; local monitor is the fallback while AskDroid is focused")
         }
+
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self else { return event }
+            guard let self, !self.isRecordingShortcut else { return event }
             if self.isConfiguredHotkey(event) {
                 self.fire(source: "local")
                 return nil
             }
             return event
         }
+        return registerStatus
     }
 
     func unregister() {
@@ -71,19 +72,10 @@ final class HotkeyCenter {
             RemoveEventHandler(handler)
             self.handler = nil
         }
-        if let globalMonitor {
-            NSEvent.removeMonitor(globalMonitor)
-            self.globalMonitor = nil
-        }
         if let localMonitor {
             NSEvent.removeMonitor(localMonitor)
             self.localMonitor = nil
         }
-    }
-
-    private func handleMonitor(_ event: NSEvent, source: String) {
-        guard isConfiguredHotkey(event) else { return }
-        fire(source: source)
     }
 
     private func isConfiguredHotkey(_ event: NSEvent) -> Bool {
@@ -100,6 +92,7 @@ final class HotkeyCenter {
     }
 
     private func fire(source: String) {
+        guard !isRecordingShortcut else { return }
         let now = Date()
         guard now.timeIntervalSince(lastFire) > 0.2 else { return }
         lastFire = now

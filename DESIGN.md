@@ -26,14 +26,14 @@ SF Pro only. 15 pt composer, 14 pt answer, 13 pt chrome, 12 pt buttons, 11 pt me
 
 ## Components
 
-- Compact pill: 280 × 34 capsule under the notch while a run is live and the panel is hidden.
-- Expanded panel: 560 pt wide, 18 pt continuous corners, header / composer / answer / footer.
+- Compact pill: leading and trailing wings beside the camera housing (charcoal `#141416` + hairline) while a run is live. The gap under the lens stays black and never reacts to clicks (the camera cutout is dead space in every app, so clicks there are inert rather than pass-through — AppKit has no per-region `ignoresMouseEvents`). The pill sits in the menu-bar row beside the lens; its wings cover the strip of menu bar next to the notch, so clicks there expand the HUD rather than reaching the menu bar. Non-notch displays use a 280 × 34 floating capsule.
+- Expanded panel: 560 pt wide, one Island fill, content inset below the lens. Idle is prompt + Ask. A live or finished turn shows the question as a line, then the answer. Activity is a disclosure. Quit lives in Settings.
 - Primary action: amber capsule. Secondary: well capsule.
 - Status dot: 8 pt, amber pulse while running.
 
 ## Motion
 
-180 ms ease-out expand from the notch. Status-dot pulse only, and it honors Reduce Motion.
+220 ms ease-out expand/collapse. Reduce Motion is 120 ms. Status-dot pulse honors Reduce Motion.
 
 ## Surfaces
 
