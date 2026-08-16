@@ -122,6 +122,11 @@ struct ExpandedHUD: View {
     @ObservedObject var session: AskSession
     @Environment(\.notchMetrics) private var metrics
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isDropTargeted = false
+    @State private var activityLogExpanded = false
+    @State private var answerContentHeight: CGFloat = 0
+    @State private var answerContentMinY: CGFloat = 0
+    @State private var answerViewportHeight: CGFloat = 0
 
     private var showingResult: Bool {
         session.phase == .running || session.phase == .failed || !session.answer.isEmpty
@@ -281,58 +286,168 @@ struct ExpandedHUD: View {
                     .keyboardShortcut(.return, modifiers: .command)
             }
         }
-        .padding(16)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+    }
+
+    private var answerIsNearBottom: Bool {
+        guard answerContentHeight > answerViewportHeight + 8 else { return true }
+        return answerContentHeight + answerContentMinY <= answerViewportHeight + 28
+    }
+
+    private var answerHasOverflow: Bool {
+        answerContentHeight > answerViewportHeight + 8
     }
 
     private var answerBlock: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 10) {
-                if session.phase == .failed, let errorMessage = session.errorMessage {
-                    Text(errorMessage)
-                        .font(.system(size: 13))
-                        .foregroundStyle(Theme.dangerText)
-                }
-                if let archiveError = session.archiveError {
-                    Text(archiveError)
-                        .font(.system(size: 13))
-                        .foregroundStyle(Theme.dangerText)
-                        .textSelection(.enabled)
-                }
-                if !session.thinking.isEmpty, session.answer.isEmpty || session.phase == .running {
-                    Text(session.thinking)
-                        .font(.system(size: 12))
-                        .foregroundStyle(Theme.mute)
-                        .textSelection(.enabled)
-                }
-                if !session.answer.isEmpty {
-                    Markdown(session.answer)
-                        .markdownTheme(AskDroidMarkdown.theme)
-                        .textSelection(.enabled)
-                } else if session.phase == .running {
-                    Text(session.activity)
-                        .font(.system(size: 13))
-                        .foregroundStyle(Theme.mute)
-                }
-                if !session.runLog.isEmpty {
-                    DisclosureGroup("Activity") {
-                        VStack(alignment: .leading, spacing: 3) {
-                            ForEach(Array(session.runLog.suffix(20).enumerated()), id: \.offset) { _, line in
-                                Text(line)
-                                    .font(.system(size: 11).monospaced())
-                                    .foregroundStyle(Theme.mute)
-                                    .textSelection(.enabled)
-                                    .fixedSize(horizontal: false, vertical: true)
+        ScrollViewReader { proxy in
+            ZStack(alignment: .bottomTrailing) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if session.phase == .failed, let errorMessage = session.errorMessage {
+                            failureBlock(errorMessage)
+                        }
+                        if let archiveError = session.archiveError {
+                            Text(archiveError)
+                                .font(.system(size: 13))
+                                .foregroundStyle(Theme.dangerText)
+                                .textSelection(.enabled)
+                        }
+                        if !session.thinking.isEmpty, session.answer.isEmpty || session.phase == .running {
+                            Text(session.thinking)
+                                .font(.system(size: 12))
+                                .foregroundStyle(Theme.mute)
+                                .lineSpacing(2)
+                                .textSelection(.enabled)
+                        }
+                        if !session.answer.isEmpty {
+                            Markdown(session.answer)
+                                .markdownTheme(AskDroidMarkdown.theme)
+                                .lineSpacing(3)
+                                .tracking(0.1)
+                                .textSelection(.enabled)
+                        } else if session.phase == .running {
+                            Text(session.activity)
+                                .font(.system(size: 13))
+                                .foregroundStyle(Theme.mute)
+                        }
+                        if !session.runLog.isEmpty {
+                            DisclosureGroup("Activity", isExpanded: $activityLogExpanded) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    ForEach(Array(session.runLog.suffix(20).enumerated()), id: \.offset) { _, line in
+                                        Text(line)
+                                            .font(.system(size: 11).monospaced())
+                                            .foregroundStyle(Theme.mute)
+                                            .textSelection(.enabled)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                }
                             }
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Theme.mute)
+                        }
+                        Color.clear
+                            .frame(height: 1)
+                            .id(AnswerScrollAnchor.bottom)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 16)
+                    .background {
+                        GeometryReader { proxy in
+                            Color.clear
+                                .preference(
+                                    key: AnswerContentHeightKey.self,
+                                    value: proxy.size.height
+                                )
+                                .preference(
+                                    key: AnswerContentMinYKey.self,
+                                    value: proxy.frame(in: .named(AnswerScrollSpace.name)).minY
+                                )
                         }
                     }
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(Theme.mute)
+                }
+                .frame(maxHeight: 280)
+                .coordinateSpace(name: AnswerScrollSpace.name)
+                .background {
+                    GeometryReader { proxy in
+                        Color.clear
+                            .preference(
+                                key: AnswerViewportHeightKey.self,
+                                value: proxy.size.height
+                            )
+                    }
+                }
+
+                if session.phase == .running, answerHasOverflow, !answerIsNearBottom {
+                    Button {
+                        followAnswer(proxy)
+                    } label: {
+                        Label("Latest", systemImage: "arrow.down")
+                    }
+                    .buttonStyle(GhostButtonStyle())
+                    .accessibilityLabel("Jump to latest answer")
+                    .padding(.trailing, 20)
+                    .padding(.bottom, 12)
+                    .transition(.opacity)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(16)
+            .onPreferenceChange(AnswerContentHeightKey.self) { answerContentHeight = $0 }
+            .onPreferenceChange(AnswerContentMinYKey.self) { answerContentMinY = $0 }
+            .onPreferenceChange(AnswerViewportHeightKey.self) { answerViewportHeight = $0 }
+            .onChange(of: session.phase) { _, phase in
+                switch phase {
+                case .failed:
+                    activityLogExpanded = true
+                case .running:
+                    activityLogExpanded = false
+                default:
+                    break
+                }
+            }
+            .onAppear {
+                if session.phase == .failed {
+                    activityLogExpanded = true
+                }
+            }
+            .onChange(of: session.answer.count) { _, _ in
+                if session.phase == .running, answerIsNearBottom {
+                    followAnswer(proxy)
+                }
+            }
+            .onChange(of: session.thinking.count) { _, _ in
+                if session.phase == .running, answerIsNearBottom {
+                    followAnswer(proxy)
+                }
+            }
         }
-        .frame(maxHeight: 280)
+    }
+
+    private func followAnswer(_ proxy: ScrollViewProxy) {
+        withAnimation(.easeOut(duration: 0.18)) {
+            proxy.scrollTo(AnswerScrollAnchor.bottom, anchor: .bottom)
+        }
+    }
+
+    private func failureBlock(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.danger)
+                .padding(.top, 2)
+            Text(message)
+                .font(.system(size: 13))
+                .foregroundStyle(Theme.ink)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.well, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Theme.hairline, lineWidth: 1)
+        }
     }
 
     private var footer: some View {
@@ -348,24 +463,45 @@ struct ExpandedHUD: View {
             }
             Spacer()
             if !session.answer.isEmpty {
-                Button(session.copied ? "Copied" : "Copy") {
+                Button {
                     session.copyAnswer()
+                } label: {
+                    Label(
+                        session.copied ? "Copied" : "Copy",
+                        systemImage: session.copied ? "checkmark" : "doc.on.doc"
+                    )
                 }
                 .buttonStyle(GhostButtonStyle())
+                .foregroundStyle(session.copied ? Theme.success : Theme.ink)
+                .help("Copy answer")
             }
             if session.archiveURL != nil {
-                Button("Open file", action: session.openArchive)
-                    .buttonStyle(GhostButtonStyle())
-            }
-            if session.phase == .completed || session.phase == .failed {
-                Button("New") {
-                    session.resetComposer()
+                Button {
+                    session.openArchive()
+                } label: {
+                    Label("Open file", systemImage: "folder")
                 }
                 .buttonStyle(GhostButtonStyle())
+                .help("Reveal the saved answer file")
+            }
+            if session.phase == .failed {
+                Button("Try again") {
+                    session.submit()
+                }
+                .buttonStyle(PrimaryButtonStyle())
+            }
+            if session.phase == .completed || session.phase == .failed {
+                Button {
+                    session.resetComposer()
+                } label: {
+                    Label("New", systemImage: "plus")
+                }
+                .buttonStyle(GhostButtonStyle())
+                .help("Start a new question")
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
     }
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {

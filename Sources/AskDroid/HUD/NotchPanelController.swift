@@ -235,11 +235,29 @@ final class NotchPanelController {
 
     private func contentHeight() -> CGFloat {
         if session.isSettingsOpen { return Theme.settingsContentHeight }
+        if session.phase == .completed || session.phase == .failed {
+            // Settle to the rendered content so a one-line answer does not leave
+            // a tall void under it. Falls back to the fixed reserve if the
+            // hosting view has not laid out yet.
+            if let measured = settledContentHeight() {
+                return max(Theme.composerContentHeight, measured)
+            }
+            return Theme.composerContentHeight + Theme.answerBlockHeight
+        }
         var height = Theme.composerContentHeight
         if !session.images.isEmpty { height += Theme.imageStripHeight }
-        if session.phase == .running || session.phase == .failed || !session.answer.isEmpty {
+        if session.phase == .running || !session.answer.isEmpty {
             height += Theme.answerBlockHeight
         }
+        return height
+    }
+
+    /// Ideal expanded content height from the live SwiftUI hierarchy, or nil
+    /// before first layout or when the measurement is implausible.
+    private func settledContentHeight() -> CGFloat? {
+        hosting.layoutSubtreeIfNeeded()
+        let height = hosting.fittingSize.height
+        guard height > 0, height.isFinite, height < Theme.maxExpandedHeight else { return nil }
         return height
     }
 
@@ -261,6 +279,16 @@ final class NotchPanelController {
         if metricsChanged {
             lastMetrics = metrics
             hosting.rootView = HUDRootView(session: session, metrics: metrics)
+        }
+        if session.isExpanded, session.phase == .completed || session.phase == .failed {
+            // SwiftUI updates on the next runloop turn; re-measure once the
+            // result content has rendered so the panel hugs short answers.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.session.isExpanded,
+                      self.session.phase == .completed || self.session.phase == .failed
+                else { return }
+                self.reposition()
+            }
         }
         var next = metrics.frame(
             for: CGSize(width: size.width.rounded(), height: size.height.rounded()),
