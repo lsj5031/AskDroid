@@ -65,9 +65,11 @@ struct NotchMetrics: Equatable, Sendable {
 
     var compactSize: CGSize {
         if hasNotch {
+            // Wings sit exactly flush with the lens so the pill's top and
+            // bottom edges line up with the physical cutout.
             return CGSize(
                 width: compactLeadingWidth + notchWidth + compactTrailingWidth,
-                height: max(notchHeight, menubarHeight, 34)
+                height: notchHeight
             )
         }
         return CGSize(width: Theme.pillWidth, height: Theme.pillHeight)

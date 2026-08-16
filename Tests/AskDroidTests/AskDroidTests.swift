@@ -324,6 +324,7 @@ final class NotchMetricsTests: XCTestCase {
         XCTAssertTrue(metrics.hasNotch)
         XCTAssertEqual(metrics.notchWidth, 212)
         XCTAssertEqual(metrics.notchHeight, 32)
+        XCTAssertEqual(metrics.compactSize.height, metrics.notchHeight)
         XCTAssertEqual(metrics.notchFrame.origin.y, screen.maxY - 32)
         XCTAssertEqual(metrics.notchFrame.midX, screen.midX, accuracy: 0.5)
 
