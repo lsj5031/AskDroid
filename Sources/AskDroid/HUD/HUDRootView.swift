@@ -144,7 +144,7 @@ struct ExpandedHUD: View {
             if session.isSettingsOpen {
                 ScrollView {
                     SettingsPane(session: session)
-                        .padding(16)
+                        .padding(20)
                 }
             } else if showingResult {
                 questionLine
@@ -211,15 +211,19 @@ struct ExpandedHUD: View {
                     .lineLimit(1)
             }
             Spacer()
-            IconButton(systemName: session.isSettingsOpen ? "bubble.left" : "gearshape", label: session.isSettingsOpen ? "Back" : "Settings") {
-                session.isSettingsOpen.toggle()
+            IconButton(systemName: session.isSettingsOpen ? "chevron.left" : "gearshape", label: session.isSettingsOpen ? "Back" : "Settings") {
+                if session.isSettingsOpen {
+                    session.closeSettings()
+                } else {
+                    session.isSettingsOpen = true
+                }
             }
             IconButton(systemName: "xmark", label: "Hide") {
                 session.dismiss()
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
     }
 
     private var questionLine: some View {

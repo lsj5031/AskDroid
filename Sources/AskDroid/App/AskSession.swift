@@ -81,11 +81,20 @@ final class AskSession: ObservableObject {
     }
 
     func dismiss() {
+        if isSettingsOpen {
+            saveSettings()
+        }
         isExpanded = false
         isSettingsOpen = false
         if phase == .composing, prompt.isEmpty, images.isEmpty {
             phase = .idle
         }
+    }
+
+    func closeSettings() {
+        guard isSettingsOpen else { return }
+        saveSettings()
+        isSettingsOpen = false
     }
 
     func submit() {

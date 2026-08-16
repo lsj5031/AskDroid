@@ -70,6 +70,9 @@ struct SettingsPane: View {
             Toggle("Launch at login", isOn: $session.settings.launchAtLogin)
                 .toggleStyle(.switch)
                 .tint(Theme.accent)
+            Link("Droid documentation", destination: URL(string: "https://docs.factory.ai/droid-exec/overview")!)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Theme.accent)
             HStack {
                 Button("Quit", action: session.quit)
                     .buttonStyle(GhostButtonStyle())
