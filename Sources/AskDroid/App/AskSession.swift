@@ -13,7 +13,13 @@ final class AskSession: ObservableObject {
     }
 
     @Published var settings: AppSettings
+    enum PresentSource: Equatable {
+        case user
+        case hover
+    }
+
     @Published var isExpanded = false
+    @Published var presentSource: PresentSource = .user
     @Published var isSettingsOpen = false
     @Published var prompt = ""
     @Published var images: [AttachedImage] = []
@@ -66,25 +72,41 @@ final class AskSession: ObservableObject {
         if isExpanded {
             dismiss()
         } else {
-            present()
+            present(source: .user)
         }
     }
 
-    func present() {
+    func present(source: PresentSource = .user) {
         isExpanded = true
-        isSettingsOpen = false
-        if phase == .idle {
+        presentSource = source
+        if source == .user {
+            isSettingsOpen = false
+        }
+        if phase == .idle, source == .user {
             phase = .composing
         }
-        NotificationCenter.default.post(name: .askDroidFocusInput, object: nil)
+        if source == .user {
+            NotificationCenter.default.post(name: .askDroidFocusInput, object: nil)
+        }
+    }
+
+    func promoteHoverToUser() {
+        guard isExpanded, presentSource == .hover else { return }
+        present(source: .user)
     }
 
     func dismiss() {
         isExpanded = false
+        presentSource = .user
         isSettingsOpen = false
         if phase == .composing, prompt.isEmpty, images.isEmpty {
             phase = .idle
         }
+    }
+
+    func dismissHoverIfNeeded() {
+        guard isExpanded, presentSource == .hover else { return }
+        dismiss()
     }
 
     func submit() {
