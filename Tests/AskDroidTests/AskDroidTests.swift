@@ -707,6 +707,29 @@ final class EngineStateMachineTests: XCTestCase {
     }
 }
 
+final class MainMenuTests: XCTestCase {
+    /// The composer lives in a borderless window; without a main menu AppKit
+    /// never dispatches standard editing key equivalents to the text view.
+    func testMainMenuProvidesEditingKeyEquivalents() {
+        let menu = MainMenuBuilder.build()
+        let edit = menu.items.compactMap(\.submenu).first
+        XCTAssertNotNil(edit, "expected an Edit submenu")
+        let equivalents = Dictionary(
+            edit?.items.compactMap { item -> (String, Selector)? in
+                guard let action = item.action else { return nil }
+                return (item.keyEquivalent, action)
+            }.map { ($0.0, $0.1) } ?? [],
+            uniquingKeysWith: { first, _ in first }
+        )
+        XCTAssertEqual(equivalents["a"], #selector(NSText.selectAll(_:)))
+        XCTAssertEqual(equivalents["c"], #selector(NSText.copy(_:)))
+        XCTAssertEqual(equivalents["v"], #selector(NSText.paste(_:)))
+        XCTAssertEqual(equivalents["x"], #selector(NSText.cut(_:)))
+        XCTAssertEqual(equivalents["z"], Selector(("undo:")))
+        XCTAssertEqual(equivalents["Z"], Selector(("redo:")))
+    }
+}
+
 final class RealDroidIntegrationTests: XCTestCase {
     /// Runs the real droid CLI through the production engine and launcher.
     /// Skipped unless ASKDROID_INTEGRATION=1 is set.

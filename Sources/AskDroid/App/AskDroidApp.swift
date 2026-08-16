@@ -10,6 +10,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        NSApp.mainMenu = MainMenuBuilder.build()
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
 
         AskLog.line("launch pid=\(ProcessInfo.processInfo.processIdentifier)")
@@ -120,6 +121,29 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 AskLog.line("mkdir failed \(path): \(error.localizedDescription)")
             }
         }
+    }
+}
+
+/// Agent apps have no visible menu bar, but AppKit still routes standard key
+/// equivalents (⌘A/⌘C/⌘V/⌘X/⌘Z) through the main menu into the responder
+/// chain. Without one, the composer silently ignores them.
+enum MainMenuBuilder {
+    static func build() -> NSMenu {
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+
+        let editItem = NSMenuItem()
+        editItem.submenu = edit
+
+        let menu = NSMenu()
+        menu.addItem(editItem)
+        return menu
     }
 }
 
