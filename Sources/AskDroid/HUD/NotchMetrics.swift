@@ -40,16 +40,6 @@ struct NotchMetrics: Equatable, Sendable {
         safeAreaTop: 32
     )
 
-    func placed(on screen: NSScreen) -> NotchMetrics {
-        var copy = self
-        copy.screenFrame = screen.frame
-        copy.visibleFrame = screen.visibleFrame
-        // Re-center the measured lens on the target screen (the marketing
-        // metrics carry a synthetic origin).
-        copy.notchLeftEdge = screen.frame.midX - copy.notchWidth / 2
-        return copy
-    }
-
     var notchFrame: CGRect {
         CGRect(
             x: notchLeftEdge,

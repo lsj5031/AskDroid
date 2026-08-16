@@ -82,9 +82,11 @@ final class NotchPanelController {
         }
 
         let guardSurface = SurfaceGuard(panel: panel)
-        guardSurface.onHideChanged = { [weak self] hidden in
-            guard let self, !hidden else { return }
-            self.updateVisibility()
+        // The guard only flips state; this controller always decides whether
+        // to order the panel out, so an expanded (user-summoned) HUD survives
+        // screenshots and fullscreen covers.
+        guardSurface.onHideChanged = { [weak self] _ in
+            self?.updateVisibility()
         }
         self.guardSurface = guardSurface
 

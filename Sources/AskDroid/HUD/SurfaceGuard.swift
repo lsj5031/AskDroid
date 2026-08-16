@@ -40,7 +40,7 @@ final class SurfaceGuard {
         let handler: (NSEvent) -> Void = { [weak self] event in
             guard let self, Self.isScreenshotChord(event) else { return }
             Task { @MainActor in
-                self.hideForCapture(duration: 1.4)
+                self.hideForCapture(duration: Self.captureHideDuration(for: event.keyCode))
             }
         }
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
@@ -74,6 +74,18 @@ final class SurfaceGuard {
         switch keyCode {
         case 20, 21, 23: return true
         default: return false
+        }
+    }
+
+    /// How long a screenshot chord keeps the surface hidden. ⌘⇧4 opens a
+    /// region selection the user can drag for several seconds and there is no
+    /// app to observe while it is in progress, so it gets a longer timer.
+    /// ⌘⇧5 is covered by the suppressed-until-resign state once Screenshot.app
+    /// activates, so its chord timer only bridges that gap.
+    nonisolated static func captureHideDuration(for keyCode: UInt16) -> TimeInterval {
+        switch keyCode {
+        case 21: return 8 // ⌘⇧4 region selection
+        default: return 1.4 // ⌘⇧3 instant capture; ⌘⇧5 handled on activation
         }
     }
 
@@ -123,8 +135,10 @@ final class SurfaceGuard {
         let timedActive = hideUntil.map { Date() < $0 } ?? false
         let shouldHide = timedActive || suppressedBundleID != nil
         if shouldHide, !isHidden {
+            // Only flip state; NotchPanelController decides whether to actually
+            // order the panel out, so an explicitly summoned (expanded) HUD is
+            // never hidden by a capture.
             isHidden = true
-            panel?.orderOut(nil)
             onHideChanged?(true)
             AskLog.line("capture hide")
         } else if !shouldHide, isHidden {
@@ -148,7 +162,11 @@ enum DisplayOccupation {
         ourPID: pid_t
     ) -> Bool {
         guard ownerPID != ourPID, ownerPID != 0, layer <= 0 else { return false }
-        return coversScreen(bounds, screen: screen)
+        // Width/height alone match any same-sized display, so a fullscreen
+        // window on an identical monitor must not count as covering this one.
+        guard coversScreen(bounds, screen: screen) else { return false }
+        let overlap = bounds.intersection(screen)
+        return !overlap.isNull && overlap.width > 1 && overlap.height > 1
     }
 
     static func frontmostCovers(_ screen: NSScreen, ourPID: pid_t = ProcessInfo.processInfo.processIdentifier) -> Bool {
@@ -156,7 +174,15 @@ enum DisplayOccupation {
         guard frontPID != 0, frontPID != ourPID else { return false }
         let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
         guard let windows = info as? [[String: Any]] else { return false }
-        let screenFrame = screen.frame
+        // Window-list bounds live in Quartz's top-left-origin global space, so
+        // compare against the display's bounds in that same space (origin
+        // included) rather than AppKit screen coordinates.
+        let quartzScreen: CGRect
+        if let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber {
+            quartzScreen = CGDisplayBounds(CGDirectDisplayID(number.uint32Value))
+        } else {
+            quartzScreen = CGRect(x: 0, y: 0, width: screen.frame.width, height: screen.frame.height)
+        }
         for window in windows {
             let layer = window[kCGWindowLayer as String] as? Int ?? 0
             let owner = window[kCGWindowOwnerPID as String] as? pid_t ?? 0
@@ -165,7 +191,6 @@ enum DisplayOccupation {
                 (window[kCGWindowBounds as String] as? NSDictionary) as? [String: CGFloat]
             else { continue }
             let candidate = CGRect(x: 0, y: 0, width: boundsDict["Width"] ?? 0, height: boundsDict["Height"] ?? 0)
-            let quartzScreen = CGRect(x: 0, y: 0, width: screenFrame.width, height: screenFrame.height)
             if isForeignFullscreen(
                 bounds: candidate,
                 screen: quartzScreen,
