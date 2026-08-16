@@ -6,7 +6,9 @@ enum Theme {
     static let mute = Color.white.opacity(0.56)
     static let hairline = Color.white.opacity(0.10)
     static let well = Color.black.opacity(0.28)
-    static let panelFill = Color(red: 0.07, green: 0.07, blue: 0.075)
+    /// Hover fill for well-based controls; just brighter than `well`.
+    static let wellHover = Color.white.opacity(0.15)
+    static let panelFill = Color(red: 0.07, green: 0.07, blue: 0.075, opacity: 0.96)
     static let pillFill = Color(red: 0.08, green: 0.08, blue: 0.085)
     static let success = Color(red: 0.45, green: 0.84, blue: 0.52)
     static let danger = Color(red: 1, green: 0.45, blue: 0.38)
