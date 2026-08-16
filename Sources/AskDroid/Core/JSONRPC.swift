@@ -56,6 +56,7 @@ enum DroidNotification {
     case toolResult(String)
     case tokenUsage(TokenUsage)
     case workingState(String)
+    case milestone(String)
     case error(String)
     case turnCompleted(durationMs: Double?, tokenUsage: TokenUsage?)
     case ignored
@@ -111,6 +112,19 @@ enum DroidNotificationParser {
             return .ignored
         case "droid_working_state_changed":
             return .workingState((payload["newState"] as? String) ?? "working")
+        case "mcp_status_changed":
+            return .milestone(mcpSummary(from: payload))
+        case "settings_updated":
+            return .milestone("Session settings loaded")
+        case "hook_execution_started":
+            let event = (payload["hookEventName"] as? String) ?? "session"
+            return .milestone("Running \(event) hook…")
+        case "hook_execution_completed":
+            let event = (payload["hookEventName"] as? String) ?? "Session"
+            let status = (payload["hookStatus"] as? String) ?? "completed"
+            return .milestone("\(event) hook \(status)")
+        case "create_message":
+            return .ignored
         case "error":
             return .error((payload["message"] as? String) ?? "Droid reported an error.")
         case "agent_turn_completed":
@@ -170,6 +184,20 @@ enum DroidNotificationParser {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard cleaned.count > limit else { return cleaned }
         return String(cleaned.prefix(limit)) + "…"
+    }
+
+    private static func mcpSummary(from payload: [String: Any]) -> String {
+        guard let summary = payload["summary"] as? [String: Any] else {
+            return "MCP server status updated"
+        }
+        let total = intValue(summary["total"]) ?? 0
+        let connected = intValue(summary["connected"]) ?? 0
+        let connecting = intValue(summary["connecting"]) ?? 0
+        let failed = intValue(summary["failed"]) ?? 0
+        if total == 0 { return "No MCP servers configured" }
+        if connecting > 0 { return "Connecting MCP servers…" }
+        if failed > 0 { return "MCP servers: \(connected) connected, \(failed) failed" }
+        return "MCP servers: \(connected) connected"
     }
 
     private static func tokenUsage(from value: Any?) -> TokenUsage? {

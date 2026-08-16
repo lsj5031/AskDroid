@@ -131,15 +131,30 @@ enum AskLog {
         state.write(message)
     }
 
+    /// Redirects the log file. Tests use this to keep runs out of the real log.
+    static func setDirectoryOverrideForTesting(_ url: URL?) {
+        state.setDirectoryOverride(url)
+    }
+
     private final class LogState: @unchecked Sendable {
         private let lock = NSLock()
         private var handle: FileHandle?
         private var url: URL?
+        private var directoryOverride: URL?
+
+        func setDirectoryOverride(_ url: URL?) {
+            lock.lock()
+            defer { lock.unlock() }
+            directoryOverride = url
+            try? handle?.close()
+            handle = nil
+            self.url = nil
+        }
 
         func write(_ message: String) {
             lock.lock()
             defer { lock.unlock() }
-            let dir = FileManager.default.homeDirectoryForCurrentUser
+            let dir = directoryOverride ?? FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Library/Logs/AskDroid", isDirectory: true)
             do {
                 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
