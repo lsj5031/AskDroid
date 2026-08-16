@@ -37,6 +37,7 @@ private struct HotkeyCatcher: NSViewRepresentable {
             modifiers = mods
             isActive = false
         }
+        view.onCancel = { isActive = false }
         return view
     }
 
@@ -47,27 +48,42 @@ private struct HotkeyCatcher: NSViewRepresentable {
     final class CatcherView: NSView {
         var isArmed = false
         var onCapture: ((UInt32, UInt32) -> Void)?
+        var onCancel: (() -> Void)?
         private var monitor: Any?
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
+            guard window != nil else { return }
             if monitor == nil {
                 monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
                     guard let self, self.isArmed else { return event }
                     if event.keyCode == 53 {
-                        self.isArmed = false
+                        self.onCancel?()
                         return nil
                     }
+                    // Modifier keys alone (⌘, ⌥, ⌃, ⇧, fn) aren't a shortcut.
+                    guard !(54...63).contains(Int(event.keyCode)) else { return nil }
                     let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
                     var mods: UInt32 = 0
                     if flags.contains(.command) { mods |= HotkeyCodec.command }
                     if flags.contains(.control) { mods |= HotkeyCodec.control }
                     if flags.contains(.option) { mods |= HotkeyCodec.option }
                     if flags.contains(.shift) { mods |= HotkeyCodec.shift }
-                    guard mods != 0 else { return nil }
+                    // Require ⌘, ⌃, or ⌥; a bare ⇧ shortcut is too easy to hit.
+                    guard mods & (HotkeyCodec.command | HotkeyCodec.control | HotkeyCodec.option) != 0 else {
+                        return nil
+                    }
                     self.onCapture?(UInt32(event.keyCode), mods)
                     return nil
                 }
+            }
+        }
+
+        override func viewWillMove(toWindow newWindow: NSWindow?) {
+            super.viewWillMove(toWindow: newWindow)
+            if newWindow == nil, let monitor {
+                NSEvent.removeMonitor(monitor)
+                self.monitor = nil
             }
         }
     }
