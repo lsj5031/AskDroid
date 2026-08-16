@@ -3,6 +3,13 @@ import CoreGraphics
 
 /// Whether another app is covering a display in a fullscreen / presentation way.
 enum DisplayOccupation {
+    /// Passive pill/idle hide. An explicit user present (hotkey, reopen, click)
+    /// always wins so the surface cannot desync behind an ordered-out window.
+    static func shouldHidePassiveSurface(captureHidden: Bool, fullscreenCovered: Bool, userSummoned: Bool) -> Bool {
+        guard !userSummoned else { return false }
+        return captureHidden || fullscreenCovered
+    }
+
     static func coversScreen(_ bounds: CGRect, screen: CGRect, tolerance: CGFloat = 4) -> Bool {
         bounds.width + tolerance >= screen.width && bounds.height + tolerance >= screen.height - 8
     }

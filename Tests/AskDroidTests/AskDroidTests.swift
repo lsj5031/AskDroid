@@ -403,6 +403,12 @@ final class DisplayOccupationTests: XCTestCase {
         XCTAssertFalse(DisplayOccupation.isForeignFullscreen(
             bounds: screen, screen: screen, layer: 0, ownerPID: 42, ourPID: 42
         ))
+        XCTAssertTrue(DisplayOccupation.shouldHidePassiveSurface(
+            captureHidden: true, fullscreenCovered: false, userSummoned: false
+        ))
+        XCTAssertFalse(DisplayOccupation.shouldHidePassiveSurface(
+            captureHidden: true, fullscreenCovered: true, userSummoned: true
+        ))
         XCTAssertTrue(DisplayOccupation.isForeignFullscreen(
             bounds: screen, screen: screen, layer: 0, ownerPID: 99, ourPID: 42
         ))
@@ -433,6 +439,8 @@ final class CapturePrivacyTests: XCTestCase {
         XCTAssertTrue(CapturePrivacy.shouldHideForBundle("us.zoom.xos"))
         XCTAssertTrue(CapturePrivacy.shouldHideForBundle("com.apple.screencaptureui"))
         XCTAssertFalse(CapturePrivacy.shouldHideForBundle("com.apple.Safari"))
+        XCTAssertFalse(CapturePrivacy.shouldHideForBundle("com.apple.ControlCenter"))
+        XCTAssertFalse(CapturePrivacy.shouldHideForBundle("com.raycast.macos"))
         XCTAssertFalse(CapturePrivacy.shouldHideForBundle(nil))
     }
 }

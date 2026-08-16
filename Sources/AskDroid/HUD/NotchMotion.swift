@@ -15,6 +15,7 @@ enum NotchMotion {
 struct JellyPulseModifier: ViewModifier {
     var isExpanded: Bool
     var reduceMotion: Bool
+    var spring: Animation
     @State private var scale = CGSize(width: 1, height: 1)
 
     func body(content: Content) -> some View {
@@ -35,15 +36,15 @@ struct JellyPulseModifier: ViewModifier {
         scale = expanding
             ? CGSize(width: 1.08, height: 0.78)
             : CGSize(width: 0.90, height: 1.14)
-        withAnimation(NotchMotion.jelly) {
+        withAnimation(spring) {
             scale = CGSize(width: 1, height: 1)
         }
     }
 }
 
 extension View {
-    func jellyPulse(isExpanded: Bool, reduceMotion: Bool) -> some View {
-        modifier(JellyPulseModifier(isExpanded: isExpanded, reduceMotion: reduceMotion))
+    func jellyPulse(isExpanded: Bool, reduceMotion: Bool, spring: Animation = NotchMotion.jelly) -> some View {
+        modifier(JellyPulseModifier(isExpanded: isExpanded, reduceMotion: reduceMotion, spring: spring))
     }
 }
 

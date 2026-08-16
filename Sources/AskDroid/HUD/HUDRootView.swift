@@ -19,7 +19,11 @@ struct HUDRootView: View {
         }
         .environment(\.notchMetrics, metrics)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .jellyPulse(isExpanded: session.isExpanded, reduceMotion: reduceMotion)
+        .jellyPulse(
+            isExpanded: session.isExpanded,
+            reduceMotion: reduceMotion,
+            spring: session.presentSource == .hover ? NotchMotion.hover : NotchMotion.jelly
+        )
     }
 }
 
@@ -186,7 +190,7 @@ struct ExpandedHUD: View {
                 Text(session.isSettingsOpen ? "Settings" : "AskDroid")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Theme.ink)
-                Text(session.isSettingsOpen ? "Optional overrides. Blank uses Droid defaults." : session.activity.isEmpty ? "⌃⌘D · ⌘↩ ask · Esc hide" : session.activity)
+                Text(session.isSettingsOpen ? "Optional overrides. Blank uses Droid defaults." : session.activity.isEmpty ? "\(session.settings.hotkeyDisplay) · ⌘↩ ask · Esc hide" : session.activity)
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.mute)
                     .lineLimit(1)

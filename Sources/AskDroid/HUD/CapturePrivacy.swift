@@ -29,7 +29,6 @@ final class CapturePrivacy {
     nonisolated static let recorderBundleIDs: Set<String> = [
         "com.apple.QuickTimePlayerX",
         "com.apple.replayd",
-        "com.apple.ControlCenter",
         "us.zoom.xos",
         "com.microsoft.teams2",
         "com.microsoft.teams",
@@ -37,7 +36,6 @@ final class CapturePrivacy {
         "com.hnc.Discord",
         "com.obsproject.obs-studio",
         "com.loom.desktop",
-        "com.raycast.macos",
     ]
 
     nonisolated static func shouldHideForBundle(_ id: String?) -> Bool {
@@ -106,11 +104,7 @@ final class CapturePrivacy {
 
     func hideForCapture(duration: TimeInterval) {
         let until = Date().addingTimeInterval(duration)
-        if let hideUntil, until < hideUntil {
-            // A later timed restore is already pending; keep it.
-        } else {
-            hideUntil = until
-        }
+        hideUntil = max(hideUntil ?? .distantPast, until)
         refresh()
         scheduleTimedRestore()
     }
@@ -118,8 +112,7 @@ final class CapturePrivacy {
     private func handleActivation(_ bundleID: String?) {
         if let bundleID, Self.shouldHideForBundle(bundleID) {
             suppressedBundleID = bundleID
-        } else if suppressedBundleID != nil {
-            // The capture app resigned; stop hiding for it.
+        } else {
             suppressedBundleID = nil
         }
         refresh()
@@ -147,8 +140,6 @@ final class CapturePrivacy {
         refresh()
     }
 
-    /// Hides while either condition is active: a timed chord capture, or a
-    /// screenshot/recorder app being frontmost. Restores only once both clear.
     private func refresh() {
         let timedActive = hideUntil.map { Date() < $0 } ?? false
         let shouldHide = timedActive || suppressedBundleID != nil

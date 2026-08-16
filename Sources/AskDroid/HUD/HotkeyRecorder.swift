@@ -43,48 +43,53 @@ private struct HotkeyCatcher: NSViewRepresentable {
 
     func updateNSView(_ nsView: CatcherView, context: Context) {
         nsView.isArmed = isActive
+        HotkeyCenter.shared.isRecordingShortcut = isActive
+        if isActive {
+            nsView.window?.makeFirstResponder(nsView)
+        } else if nsView.window?.firstResponder === nsView {
+            nsView.window?.makeFirstResponder(nil)
+        }
     }
 
     final class CatcherView: NSView {
         var isArmed = false
         var onCapture: ((UInt32, UInt32) -> Void)?
         var onCancel: (() -> Void)?
-        private var monitor: Any?
 
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            guard window != nil else { return }
-            if monitor == nil {
-                monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                    guard let self, self.isArmed else { return event }
-                    if event.keyCode == 53 {
-                        self.onCancel?()
-                        return nil
-                    }
-                    // Modifier keys alone (⌘, ⌥, ⌃, ⇧, fn) aren't a shortcut.
-                    guard !(54...63).contains(Int(event.keyCode)) else { return nil }
-                    let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-                    var mods: UInt32 = 0
-                    if flags.contains(.command) { mods |= HotkeyCodec.command }
-                    if flags.contains(.control) { mods |= HotkeyCodec.control }
-                    if flags.contains(.option) { mods |= HotkeyCodec.option }
-                    if flags.contains(.shift) { mods |= HotkeyCodec.shift }
-                    // Require ⌘, ⌃, or ⌥; a bare ⇧ shortcut is too easy to hit.
-                    guard mods & (HotkeyCodec.command | HotkeyCodec.control | HotkeyCodec.option) != 0 else {
-                        return nil
-                    }
-                    self.onCapture?(UInt32(event.keyCode), mods)
-                    return nil
-                }
+        override var acceptsFirstResponder: Bool { true }
+
+        override func resignFirstResponder() -> Bool {
+            let resigned = super.resignFirstResponder()
+            if resigned, isArmed {
+                isArmed = false
+                HotkeyCenter.shared.isRecordingShortcut = false
+                onCancel?()
             }
+            return resigned
         }
 
-        override func viewWillMove(toWindow newWindow: NSWindow?) {
-            super.viewWillMove(toWindow: newWindow)
-            if newWindow == nil, let monitor {
-                NSEvent.removeMonitor(monitor)
-                self.monitor = nil
+        override func keyDown(with event: NSEvent) {
+            guard isArmed else {
+                super.keyDown(with: event)
+                return
             }
+            if event.keyCode == 53 {
+                isArmed = false
+                HotkeyCenter.shared.isRecordingShortcut = false
+                onCancel?()
+                return
+            }
+            guard !(54...63).contains(Int(event.keyCode)) else { return }
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            var mods: UInt32 = 0
+            if flags.contains(.command) { mods |= HotkeyCodec.command }
+            if flags.contains(.control) { mods |= HotkeyCodec.control }
+            if flags.contains(.option) { mods |= HotkeyCodec.option }
+            if flags.contains(.shift) { mods |= HotkeyCodec.shift }
+            guard mods & (HotkeyCodec.command | HotkeyCodec.control | HotkeyCodec.option) != 0 else { return }
+            isArmed = false
+            HotkeyCenter.shared.isRecordingShortcut = false
+            onCapture?(UInt32(event.keyCode), mods)
         }
     }
 }

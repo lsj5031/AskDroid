@@ -13,6 +13,8 @@ final class HotkeyCenter {
     private var lastFire: Date = .distantPast
     private var keyCode: UInt32 = AppSettings.defaultHotkeyKeyCode
     private var modifiers: UInt32 = AppSettings.defaultHotkeyModifiers
+    /// Settings recorder is capturing a new shortcut; swallow neither Esc nor the current hotkey.
+    var isRecordingShortcut = false
 
     @discardableResult
     func register(keyCode: UInt32, modifiers: UInt32, handler callback: @escaping () -> Void) -> OSStatus {
@@ -57,7 +59,7 @@ final class HotkeyCenter {
             }
         }
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self else { return event }
+            guard let self, !self.isRecordingShortcut else { return event }
             if self.isConfiguredHotkey(event) {
                 self.fire(source: "local")
                 return nil
@@ -105,6 +107,7 @@ final class HotkeyCenter {
     }
 
     private func fire(source: String) {
+        guard !isRecordingShortcut else { return }
         let now = Date()
         guard now.timeIntervalSince(lastFire) > 0.2 else { return }
         lastFire = now

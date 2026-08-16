@@ -58,6 +58,8 @@ enum ScreenshotStudio {
             session.present(source: .user)
             session.isSettingsOpen = true
             session.phase = .completed
+            session.settings.workingDirectory = "~/Library/Application Support/AskDroid/workspace"
+            session.settings.answersDirectory = "~/Library/Application Support/AskDroid/answers"
         }
 
         await capture(name: "pill", directory: directory) {
