@@ -411,6 +411,32 @@ final class DisplayOccupationTests: XCTestCase {
             screen: screen, layer: 0, ownerPID: 99, ourPID: 42
         ))
     }
+
+    func testSameSizeSecondDisplayIsNotFullscreen() {
+        // A fullscreen window on an identical display beside or above the
+        // pinned one must not count as covering it (width/height match).
+        let screen = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let beside = CGRect(x: 1512, y: 0, width: 1512, height: 982)
+        XCTAssertFalse(DisplayOccupation.isForeignFullscreen(
+            bounds: beside, screen: screen, layer: 0, ownerPID: 99, ourPID: 42
+        ))
+        let above = CGRect(x: 0, y: -982, width: 1512, height: 982)
+        XCTAssertFalse(DisplayOccupation.isForeignFullscreen(
+            bounds: above, screen: screen, layer: 0, ownerPID: 99, ourPID: 42
+        ))
+        // The same window positioned over this screen still counts.
+        XCTAssertTrue(DisplayOccupation.isForeignFullscreen(
+            bounds: screen, screen: screen, layer: 0, ownerPID: 99, ourPID: 42
+        ))
+    }
+
+    func testTouchingEdgeIsNotFullscreen() {
+        let screen = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let touching = CGRect(x: 1512 - 1, y: 0, width: 1512, height: 982)
+        XCTAssertFalse(DisplayOccupation.isForeignFullscreen(
+            bounds: touching, screen: screen, layer: 0, ownerPID: 99, ourPID: 42
+        ))
+    }
 }
 
 final class LaunchContextTests: XCTestCase {
@@ -444,6 +470,13 @@ final class SurfaceGuardTests: XCTestCase {
         XCTAssertFalse(SurfaceGuard.shouldHidePassiveSurface(
             captureHidden: true, fullscreenCovered: true, userSummoned: true
         ))
+    }
+
+    func testCaptureHideDurations() {
+        XCTAssertEqual(SurfaceGuard.captureHideDuration(for: 20), 1.4) // ⌘⇧3
+        XCTAssertEqual(SurfaceGuard.captureHideDuration(for: 21), 8)   // ⌘⇧4 region selection
+        XCTAssertEqual(SurfaceGuard.captureHideDuration(for: 23), 1.4) // ⌘⇧5
+        XCTAssertEqual(SurfaceGuard.captureHideDuration(for: 0), 1.4)  // not a chord
     }
 }
 
