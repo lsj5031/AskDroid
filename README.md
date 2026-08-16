@@ -18,6 +18,26 @@ AskDroid is a native Swift/SwiftUI agent app. It does not replace Droid. It talk
 - [Droid CLI](https://docs.factory.ai/droid-exec/overview) so `droid` works in Terminal
 - Xcode / Swift 6 to build from source
 
+## Install
+
+**From a release (recommended):** download the latest `AskDroid-<version>-macOS.zip` from the Releases page, unzip, and move `AskDroid.app` to `/Applications`.
+
+**From source:** see [Build](#build) below.
+
+The app is an accessory process: no Dock icon, no menu bar item. The hotkey is the front door — after launching, press **⌃⌘D** and the HUD appears.
+
+To start it at login, open the HUD, click the gear, enable **Launch at login**.
+
+### Local Network permission
+
+AskDroid talks to the `droid` CLI, which may in turn reach a model server on your local network (for example, a local MLX server). The first time that happens, macOS asks for **Local Network** permission:
+
+1. Launch AskDroid and ask a question.
+2. If macOS prompts *"AskDroid would like to find and connect to devices on your local network"*, click **Allow**.
+
+If the HUD is open when the prompt appears, it can hide behind the panel and the run fails with a *Connection error* and no answer. Fix it in **System Settings → Privacy & Security → Local Network → enable AskDroid**, quit and relaunch AskDroid, then ask again. AskDroid's failure message points here automatically.
+
+
 ## Build
 
 ```bash
@@ -27,16 +47,12 @@ cd AskDroid
 open dist/AskDroid.app
 ```
 
-The app is an accessory process: no Dock icon, no menu bar item. The hotkey is the front door.
-
-To start it at login, open the HUD, click the gear, enable **Launch at login**.
-
 ## Use it
 
 1. Press **⌃⌘D** from any app.
 2. Type a question. Paste or drop images. **⌘Return** asks, **Esc** hides.
 3. While Droid works, the HUD streams the answer. Hide it and a compact pill stays beside the notch. Click the pill or press the hotkey to open it again.
-4. Copy the answer, or open the archived Markdown file.
+4. Copy the answer (**⌘C** copies the whole answer when it's ready), or open the archived Markdown file.
 
 The HUD sets `NSWindow.sharingType = .none` and hides the compact pill during system screenshots (⌘⇧3 / 4 / 5) and Screenshot.app. A hotkey present still shows the panel. ScreenCaptureKit recorders on macOS 15+ can still see it.
 
