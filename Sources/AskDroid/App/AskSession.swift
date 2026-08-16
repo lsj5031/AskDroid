@@ -38,6 +38,7 @@ final class AskSession: ObservableObject {
     let engine: DroidEngine
     private var runTask: Task<Void, Never>?
     private var ticker: Task<Void, Never>?
+    private var copiedResetTask: Task<Void, Never>?
     private var runStartedAt: Date?
     private(set) var currentRunID: UUID?
 
@@ -215,6 +216,12 @@ final class AskSession: ObservableObject {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(answer, forType: .string)
         copied = true
+        copiedResetTask?.cancel()
+        copiedResetTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1.5))
+            guard !Task.isCancelled else { return }
+            self?.copied = false
+        }
     }
 
     func openArchive() {

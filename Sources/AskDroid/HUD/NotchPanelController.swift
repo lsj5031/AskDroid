@@ -107,6 +107,23 @@ final class NotchPanelController {
                 self.session.dismiss()
                 return nil
             }
+            let command = event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command)
+            if command, event.charactersIgnoringModifiers?.lowercased() == "c",
+               session.isExpanded,
+               session.phase == .completed || session.phase == .failed
+            {
+                // Copy the whole answer, unless the user selected text and
+                // expects the standard selection copy to win.
+                if let textView = panel.firstResponder as? NSTextView,
+                   textView.selectedRange().length > 0
+                {
+                    return event
+                }
+                if !session.answer.isEmpty {
+                    session.copyAnswer()
+                    return nil
+                }
+            }
             return event
         }
     }
