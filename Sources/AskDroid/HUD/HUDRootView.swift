@@ -75,8 +75,8 @@ struct CompactPill: View {
                         .foregroundStyle(session.phase == .failed ? Theme.danger : Theme.success)
                 }
             }
-            .frame(width: metrics.compactTrailingWidth, alignment: .trailing)
             .padding(.trailing, 10)
+            .frame(width: metrics.compactTrailingWidth, alignment: .trailing)
             .frame(maxHeight: .infinity)
             .background(Theme.pillFill)
         }
@@ -412,8 +412,8 @@ struct StatusDot: View {
     private var color: Color {
         switch phase {
         case .running: Theme.accent
-        case .completed: Color(red: 0.45, green: 0.84, blue: 0.52)
-        case .failed: Color(red: 1, green: 0.45, blue: 0.38)
+        case .completed: Theme.success
+        case .failed: Theme.danger
         default: Theme.mute
         }
     }
