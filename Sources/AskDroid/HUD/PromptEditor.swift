@@ -149,6 +149,7 @@ final class InputScrollView: NSScrollView {
 final class InputTextView: NSTextView {
     var onSubmit: (() -> Void)?
     var onPasteImages: (() -> Void)?
+    private var windowObservers: [NSObjectProtocol] = []
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -159,11 +160,51 @@ final class InputTextView: NSTextView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        guard window != nil else { return }
+        guard let window else {
+            windowObservers.removeAll()
+            return
+        }
+        let center = NotificationCenter.default
+        windowObservers = [
+            center.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.updateFocusAppearance() }
+            },
+            center.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.updateFocusAppearance() }
+            },
+        ]
+        updateFocusAppearance()
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.window?.makeFirstResponder(self)
+            self.updateFocusAppearance()
         }
+    }
+
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        updateFocusAppearance()
+        return accepted
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let accepted = super.resignFirstResponder()
+        updateFocusAppearance()
+        return accepted
+    }
+
+    /// The composer's field has no system focus ring; draw an amber hairline
+    /// around the scroll area while the text view is the key window's
+    /// first responder so keyboard users can see where they are.
+    private func updateFocusAppearance() {
+        guard let scroll = enclosingScrollView else { return }
+        let focused = window?.isKeyWindow == true && window?.firstResponder === self
+        scroll.wantsLayer = true
+        scroll.layer?.cornerRadius = 8
+        scroll.layer?.borderWidth = 1
+        scroll.layer?.borderColor = focused
+            ? NSColor(red: 0.98, green: 0.62, blue: 0.18, alpha: 0.85).cgColor
+            : NSColor.clear.cgColor
     }
 
     override func keyDown(with event: NSEvent) {

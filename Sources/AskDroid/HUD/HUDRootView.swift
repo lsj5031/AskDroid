@@ -210,15 +210,19 @@ struct ExpandedHUD: View {
             Text(session.prompt.isEmpty ? "Look at the attached image(s)." : session.prompt)
                 .font(.system(size: 13))
                 .foregroundStyle(Theme.mute)
-                .lineLimit(2)
+                .lineSpacing(2)
+                .lineLimit(session.phase == .running ? 2 : 3)
+                .truncationMode(.tail)
+                .textSelection(.enabled)
+                .help(session.prompt.isEmpty ? "Look at the attached image(s)." : session.prompt)
             Spacer(minLength: 8)
             if session.phase == .running {
                 Button("Cancel", action: session.cancelRun)
                     .buttonStyle(GhostButtonStyle())
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
     }
 
     private var composer: some View {
@@ -242,7 +246,8 @@ struct ExpandedHUD: View {
                     Text(session.images.isEmpty ? "Ask Droid anything" : "Add a note, or just send the image")
                         .font(.system(size: 15))
                         .foregroundStyle(Theme.mute)
-                        .padding(.top, 6)
+                        .padding(.horizontal, 12)
+                        .padding(.top, 10)
                         .allowsHitTesting(false)
                 }
                 PromptEditor(
@@ -251,7 +256,13 @@ struct ExpandedHUD: View {
                     onPasteImages: { session.attachFromPasteboard() }
                 )
                 .frame(minHeight: 52, maxHeight: 88)
+                .padding(.horizontal, 12)
                 .contentShape(Rectangle())
+            }
+            .background(Theme.well, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(Theme.hairline, lineWidth: 1)
             }
 
             if let notice = session.notice {
@@ -398,14 +409,54 @@ struct ImageChip: View {
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
             Button(action: onRemove) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.white, Color.black.opacity(0.55))
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 24, height: 24)
+                    .background(Color.black.opacity(0.72), in: Circle())
+                    .overlay {
+                        Circle().stroke(Color.white.opacity(0.18), lineWidth: 1)
+                    }
             }
             .buttonStyle(.plain)
+            .contentShape(Circle())
             .offset(x: 4, y: -4)
-            .accessibilityLabel("Remove image")
+            .accessibilityLabel("Remove \(image.filename)")
+            .accessibilityHint("Removes this attached image")
+            .help("Remove \(image.filename)")
         }
+    }
+}
+
+enum AnswerScrollAnchor {
+    static let bottom = "answer-bottom"
+}
+
+private enum AnswerScrollSpace {
+    static let name = "AskDroidAnswerScroll"
+}
+
+private struct AnswerContentHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+private struct AnswerContentMinYKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+private struct AnswerViewportHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
     }
 }
 
@@ -434,17 +485,28 @@ struct StatusDot: View {
 struct IconButton: View {
     let systemName: String
     let label: String
+    var tint: Color = Theme.ink
     var action: () -> Void
+    @State private var hovering = false
+    @Environment(\.isFocused) private var focused
 
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Theme.ink)
+                .foregroundStyle(tint)
                 .frame(width: 28, height: 28)
-                .background(Theme.well, in: Circle())
+                .background(hovering ? Theme.wellHover : Theme.well, in: Circle())
+                .overlay {
+                    if focused {
+                        Circle().stroke(Theme.accent.opacity(0.8), lineWidth: 1)
+                    }
+                }
         }
         .buttonStyle(.plain)
+        .focusable()
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
         .accessibilityLabel(label)
     }
 }
@@ -461,24 +523,60 @@ struct MetaLabel: View {
 }
 
 struct PrimaryButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.isFocused) private var focused
+    @State private var hovering = false
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(Color.black)
+            .foregroundStyle(isEnabled ? Color.black : Color.black.opacity(0.55))
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-            .background(Theme.accent.opacity(configuration.isPressed ? 0.82 : 1), in: Capsule())
+            .background(fill(isPressed: configuration.isPressed), in: Capsule())
+            .overlay {
+                if focused, isEnabled {
+                    Capsule().stroke(Theme.accent.opacity(0.8), lineWidth: 1)
+                }
+            }
+            .focusable()
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+
+    private func fill(isPressed: Bool) -> Color {
+        guard isEnabled else { return Theme.accent.opacity(0.32) }
+        if isPressed { return Theme.accent.opacity(0.82) }
+        if hovering { return Theme.accent.opacity(0.9) }
+        return Theme.accent
     }
 }
 
 struct GhostButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.isFocused) private var focused
+    @State private var hovering = false
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 12, weight: .medium))
-            .foregroundStyle(Theme.ink.opacity(configuration.isPressed ? 0.7 : 1))
+            .foregroundStyle(Theme.ink.opacity(labelOpacity(isPressed: configuration.isPressed)))
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(Theme.well, in: Capsule())
+            .background(hovering && isEnabled ? Theme.wellHover : Theme.well, in: Capsule())
+            .overlay {
+                if focused, isEnabled {
+                    Capsule().stroke(Theme.accent.opacity(0.8), lineWidth: 1)
+                }
+            }
+            .focusable()
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.12), value: hovering)
+    }
+
+    private func labelOpacity(isPressed: Bool) -> Double {
+        guard isEnabled else { return 0.35 }
+        return isPressed ? 0.7 : 1
     }
 }
 
