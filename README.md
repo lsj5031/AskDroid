@@ -54,7 +54,7 @@ When the turn finishes you get the whole answer, a copy button, and a link to th
 
 Press **Esc** mid-run and the HUD collapses to a pill that keeps the status under the notch:
 
-<img src="docs/screenshots/pill.png" width="360" alt="AskDroid collapsed beside the notch, showing Thinking and elapsed time">
+<img src="docs/screenshots/pill.png" width="392" alt="AskDroid collapsed beside the notch, showing Thinking and elapsed time">
 
 Files land in **Application Support/AskDroid/answers**:
 
