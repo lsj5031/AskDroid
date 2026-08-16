@@ -132,8 +132,7 @@ final class NotchPanelController {
     }
 
     func pinToCurrentScreen() {
-        let screen = screenUnderMouse() ?? NSScreen.main ?? NSScreen.screens.first
-        guard let screen else { return }
+        guard let screen = preferredScreen() else { return }
         pinToScreen(screen)
     }
 
@@ -141,7 +140,19 @@ final class NotchPanelController {
         pinnedDisplayID = displayID(of: screen)
         lastMetrics = nil
         lastAppliedSize = nil
-        AskLog.line("pin screen=\(screen.localizedName) id=\(pinnedDisplayID ?? 0)")
+        AskLog.line("pin screen=\(screen.localizedName) id=\(pinnedDisplayID ?? 0) notch=\(NotchMetrics.from(screen: screen).hasNotch)")
+    }
+
+    /// Re-anchors to the hardware-notch display when one is present, or falls
+    /// back to the best remaining display when the pinned one disappears.
+    func refreshPinning() {
+        if let notched = screenWithHardwareNotch(), pinnedDisplayID != displayID(of: notched) {
+            pinToScreen(notched)
+        } else if let id = pinnedDisplayID,
+                  !NSScreen.screens.contains(where: { displayID(of: $0) == id }) {
+            pinToCurrentScreen()
+        }
+        reposition()
     }
 
     func updateVisibility() {
@@ -224,9 +235,22 @@ final class NotchPanelController {
         {
             return match
         }
-        let fallback = screenUnderMouse() ?? NSScreen.main ?? NSScreen.screens[0]
+        let fallback = preferredScreen() ?? NSScreen.screens[0]
         pinnedDisplayID = displayID(of: fallback)
         return fallback
+    }
+
+    private func screenWithHardwareNotch() -> NSScreen? {
+        NSScreen.screens.first(where: { NotchMetrics.from(screen: $0).hasNotch })
+    }
+
+    private func preferredScreen() -> NSScreen? {
+        // This is a notch HUD: when a hardware-notch display exists, anchor the
+        // Island to it instead of following the mouse to a flat external panel.
+        if let notched = screenWithHardwareNotch() {
+            return notched
+        }
+        return screenUnderMouse() ?? NSScreen.main ?? NSScreen.screens.first
     }
 
     func useMarketingNotchForScreenshots() {

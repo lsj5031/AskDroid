@@ -93,7 +93,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.publisher(for: NSApplication.didChangeScreenParametersNotification)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.panel?.reposition()
+                self?.panel?.refreshPinning()
             }
             .store(in: &cancellables)
     }
