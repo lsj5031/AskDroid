@@ -19,11 +19,7 @@ struct HUDRootView: View {
         }
         .environment(\.notchMetrics, metrics)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .jellyPulse(
-            isExpanded: session.isExpanded,
-            reduceMotion: reduceMotion,
-            spring: session.presentSource == .hover ? NotchMotion.hover : NotchMotion.jelly
-        )
+        .animation(NotchMotion.conversion(reduceMotion: reduceMotion), value: session.isExpanded)
     }
 }
 
@@ -33,7 +29,7 @@ struct CompactPill: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        Button(action: { session.present(source: .user) }) {
+        Button(action: session.present) {
             if metrics.hasNotch {
                 notchedPill
             } else {
@@ -127,10 +123,14 @@ struct ExpandedHUD: View {
     @Environment(\.notchMetrics) private var metrics
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    private var showingResult: Bool {
+        session.phase == .running || session.phase == .failed || !session.answer.isEmpty
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if metrics.hasNotch {
-                Color.black
+                Color.clear
                     .frame(height: metrics.notchHeight)
                     .accessibilityHidden(true)
             }
@@ -141,20 +141,18 @@ struct ExpandedHUD: View {
                     SettingsPane(session: session)
                         .padding(16)
                 }
+            } else if showingResult {
+                questionLine
+                Divider().overlay(Theme.hairline)
+                answerBlock
+                footer
             } else {
                 composer
-                if !session.answer.isEmpty || session.phase == .running || session.phase == .failed {
-                    Divider().overlay(Theme.hairline)
-                    answerBlock
-                }
-                footer
             }
         }
         .frame(width: Theme.panelWidth, alignment: .topLeading)
         .frame(maxHeight: .infinity, alignment: .top)
-        .background {
-            Theme.panelFill
-        }
+        .background(Theme.panelFill)
         .overlay {
             if metrics.hasNotch {
                 NotchShape(
@@ -207,6 +205,22 @@ struct ExpandedHUD: View {
         .padding(.vertical, 12)
     }
 
+    private var questionLine: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text(session.prompt.isEmpty ? "Look at the attached image(s)." : session.prompt)
+                .font(.system(size: 13))
+                .foregroundStyle(Theme.mute)
+                .lineLimit(2)
+            Spacer(minLength: 8)
+            if session.phase == .running {
+                Button("Cancel", action: session.cancelRun)
+                    .buttonStyle(GhostButtonStyle())
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
     private var composer: some View {
         VStack(alignment: .leading, spacing: 10) {
             if !session.images.isEmpty {
@@ -236,7 +250,7 @@ struct ExpandedHUD: View {
                     onSubmit: session.submit,
                     onPasteImages: { session.attachFromPasteboard() }
                 )
-                .frame(minHeight: 84, maxHeight: 140)
+                .frame(minHeight: 52, maxHeight: 88)
                 .contentShape(Rectangle())
             }
 
@@ -250,15 +264,10 @@ struct ExpandedHUD: View {
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.mute)
                 Spacer()
-                if session.phase == .running {
-                    Button("Cancel", action: session.cancelRun)
-                        .buttonStyle(GhostButtonStyle())
-                } else {
-                    Button("Ask", action: session.submit)
-                        .buttonStyle(PrimaryButtonStyle())
-                        .disabled(!session.canSubmit)
-                        .keyboardShortcut(.return, modifiers: .command)
-                }
+                Button("Ask", action: session.submit)
+                    .buttonStyle(PrimaryButtonStyle())
+                    .disabled(!session.canSubmit)
+                    .keyboardShortcut(.return, modifiers: .command)
             }
         }
         .padding(16)
@@ -294,18 +303,19 @@ struct ExpandedHUD: View {
                         .foregroundStyle(Theme.mute)
                 }
                 if !session.runLog.isEmpty {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Activity")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Theme.mute)
-                        ForEach(Array(session.runLog.suffix(20).enumerated()), id: \.offset) { _, line in
-                            Text(line)
-                                .font(.system(size: 11).monospaced())
-                                .foregroundStyle(Theme.mute)
-                                .textSelection(.enabled)
-                                .fixedSize(horizontal: false, vertical: true)
+                    DisclosureGroup("Activity") {
+                        VStack(alignment: .leading, spacing: 3) {
+                            ForEach(Array(session.runLog.suffix(20).enumerated()), id: \.offset) { _, line in
+                                Text(line)
+                                    .font(.system(size: 11).monospaced())
+                                    .foregroundStyle(Theme.mute)
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                         }
                     }
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Theme.mute)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -342,8 +352,6 @@ struct ExpandedHUD: View {
                 }
                 .buttonStyle(GhostButtonStyle())
             }
-            Button("Quit", action: session.quit)
-                .buttonStyle(GhostButtonStyle())
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)

@@ -14,13 +14,7 @@ final class AskSession: ObservableObject {
     }
 
     @Published var settings: AppSettings
-    enum PresentSource: Equatable {
-        case user
-        case hover
-    }
-
     @Published var isExpanded = false
-    @Published var presentSource: PresentSource = .user
     @Published var isSettingsOpen = false
     @Published var prompt = ""
     @Published var images: [AttachedImage] = []
@@ -73,41 +67,25 @@ final class AskSession: ObservableObject {
         if isExpanded {
             dismiss()
         } else {
-            present(source: .user)
+            present()
         }
     }
 
-    func present(source: PresentSource = .user) {
+    func present() {
         isExpanded = true
-        presentSource = source
-        if source == .user {
-            isSettingsOpen = false
-        }
-        if phase == .idle, source == .user {
+        isSettingsOpen = false
+        if phase == .idle {
             phase = .composing
         }
-        if source == .user {
-            NotificationCenter.default.post(name: .askDroidFocusInput, object: nil)
-        }
-    }
-
-    func promoteHoverToUser() {
-        guard isExpanded, presentSource == .hover else { return }
-        present(source: .user)
+        NotificationCenter.default.post(name: .askDroidFocusInput, object: nil)
     }
 
     func dismiss() {
         isExpanded = false
-        presentSource = .user
         isSettingsOpen = false
         if phase == .composing, prompt.isEmpty, images.isEmpty {
             phase = .idle
         }
-    }
-
-    func dismissHoverIfNeeded() {
-        guard isExpanded, presentSource == .hover else { return }
-        dismiss()
     }
 
     func submit() {
@@ -353,6 +331,17 @@ final class AskSession: ObservableObject {
             trigger: nil
         )
         UNUserNotificationCenter.current().add(request)
+    }
+}
+
+enum LaunchContext {
+    static let openApplicationEvent: UInt32 = 0x6F61_7070 // 'oapp'
+    static let propDataKeyword: UInt32 = 0x7072_6474 // 'prdt'
+    static let launchedAsLoginItem: UInt32 = 0x6C67_6974 // 'lgit'
+
+    static func isLoginLaunch(event: NSAppleEventDescriptor? = NSAppleEventManager.shared().currentAppleEvent) -> Bool {
+        guard let event, event.eventID == openApplicationEvent else { return false }
+        return event.paramDescriptor(forKeyword: propDataKeyword)?.enumCodeValue == launchedAsLoginItem
     }
 }
 

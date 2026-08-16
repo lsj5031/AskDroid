@@ -4,7 +4,7 @@ struct SettingsPane: View {
     @ObservedObject var session: AskSession
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 10) {
             labeled("Hotkey") {
                 HotkeyRecorder(
                     keyCode: $session.settings.hotkeyKeyCode,
@@ -71,6 +71,8 @@ struct SettingsPane: View {
                 .toggleStyle(.switch)
                 .tint(Theme.accent)
             HStack {
+                Button("Quit", action: session.quit)
+                    .buttonStyle(GhostButtonStyle())
                 Spacer()
                 Button("Save") {
                     session.saveSettings()

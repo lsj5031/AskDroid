@@ -21,9 +21,9 @@ enum Theme {
     static let panelCorner: CGFloat = 18
     static let pillCorner: CGFloat = 17
 
-    static let settingsContentHeight: CGFloat = 560
-    static let composerContentHeight: CGFloat = 280
+    static let settingsContentHeight: CGFloat = 720
+    static let composerContentHeight: CGFloat = 188
     static let imageStripHeight: CGFloat = 72
-    static let answerBlockHeight: CGFloat = 220
-    static let maxExpandedHeight: CGFloat = 680
+    static let answerBlockHeight: CGFloat = 240
+    static let maxExpandedHeight: CGFloat = 780
 }

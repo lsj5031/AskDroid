@@ -1,12 +1,10 @@
 import AppKit
+import CoreGraphics
 
-/// Hides the HUD from screenshots and screen recordings.
-///
-/// `NSWindow.sharingType = .none` is the supported capture-exclusion flag.
-/// Screenshot chords (⌘⇧3/4/5) and Screenshot.app still briefly expose some
-/// overlays on newer macOS, so we also order the panel out for the capture.
+/// Hides the passive pill from screenshots and fullscreen covers.
+/// An explicit user present always wins.
 @MainActor
-final class CapturePrivacy {
+final class SurfaceGuard {
     private weak var panel: NSWindow?
     private var localMonitor: Any?
     private var globalMonitor: Any?
@@ -14,7 +12,7 @@ final class CapturePrivacy {
     private var hideUntil: Date?
     private var restoreTask: Task<Void, Never>?
     private var suppressedBundleID: String?
-    private(set) var isCaptureHidden = false
+    private(set) var isHidden = false
 
     var onHideChanged: ((Bool) -> Void)?
 
@@ -24,28 +22,8 @@ final class CapturePrivacy {
         "com.apple.Screenshot",
     ]
 
-    /// Recorders / meeting apps that commonly use ScreenCaptureKit, which
-    /// ignores `sharingType` on macOS 15+. Hide while they are frontmost.
-    nonisolated static let recorderBundleIDs: Set<String> = [
-        "com.apple.QuickTimePlayerX",
-        "com.apple.replayd",
-        "us.zoom.xos",
-        "com.microsoft.teams2",
-        "com.microsoft.teams",
-        "com.tinyspeck.slackmacgap",
-        "com.hnc.Discord",
-        "com.obsproject.obs-studio",
-        "com.loom.desktop",
-    ]
-
-    nonisolated static func shouldHideForBundle(_ id: String?) -> Bool {
-        guard let id else { return false }
-        return screenshotBundleIDs.contains(id) || recorderBundleIDs.contains(id)
-    }
-
     static var isDisabled: Bool {
-        let env = ProcessInfo.processInfo.environment
-        return env["ASKDROID_ALLOW_CAPTURE"] == "1" || env["ASKDROID_SCREENSHOTS"] != nil
+        ProcessInfo.processInfo.environment["ASKDROID_ALLOW_CAPTURE"] == "1"
     }
 
     init(panel: NSWindow) {
@@ -93,13 +71,20 @@ final class CapturePrivacy {
     nonisolated static func isScreenshotChord(keyCode: UInt16, flags: NSEvent.ModifierFlags) -> Bool {
         let commandShift = flags.contains(.command) && flags.contains(.shift)
         guard commandShift, !flags.contains(.option), !flags.contains(.control) else { return false }
-        // ANSI 3 / 4 / 5 (screenshot, selection, Screenshot toolbar).
         switch keyCode {
-        case 20, 21, 23:
-            return true
-        default:
-            return false
+        case 20, 21, 23: return true
+        default: return false
         }
+    }
+
+    nonisolated static func shouldHideForBundle(_ id: String?) -> Bool {
+        guard let id else { return false }
+        return screenshotBundleIDs.contains(id)
+    }
+
+    nonisolated static func shouldHidePassiveSurface(captureHidden: Bool, fullscreenCovered: Bool, userSummoned: Bool) -> Bool {
+        guard !userSummoned else { return false }
+        return captureHidden || fullscreenCovered
     }
 
     func hideForCapture(duration: TimeInterval) {
@@ -110,11 +95,7 @@ final class CapturePrivacy {
     }
 
     private func handleActivation(_ bundleID: String?) {
-        if let bundleID, Self.shouldHideForBundle(bundleID) {
-            suppressedBundleID = bundleID
-        } else {
-            suppressedBundleID = nil
-        }
+        suppressedBundleID = Self.shouldHideForBundle(bundleID) ? bundleID : nil
         refresh()
     }
 
@@ -125,9 +106,7 @@ final class CapturePrivacy {
         restoreTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard !Task.isCancelled else { return }
-            await MainActor.run {
-                self?.timedHideExpired()
-            }
+            await MainActor.run { self?.timedHideExpired() }
         }
     }
 
@@ -143,15 +122,60 @@ final class CapturePrivacy {
     private func refresh() {
         let timedActive = hideUntil.map { Date() < $0 } ?? false
         let shouldHide = timedActive || suppressedBundleID != nil
-        if shouldHide, !isCaptureHidden {
-            isCaptureHidden = true
+        if shouldHide, !isHidden {
+            isHidden = true
             panel?.orderOut(nil)
             onHideChanged?(true)
             AskLog.line("capture hide")
-        } else if !shouldHide, isCaptureHidden {
-            isCaptureHidden = false
+        } else if !shouldHide, isHidden {
+            isHidden = false
             onHideChanged?(false)
             AskLog.line("capture restore")
         }
+    }
+}
+
+enum DisplayOccupation {
+    static func coversScreen(_ bounds: CGRect, screen: CGRect, tolerance: CGFloat = 4) -> Bool {
+        bounds.width + tolerance >= screen.width && bounds.height + tolerance >= screen.height - 8
+    }
+
+    static func isForeignFullscreen(
+        bounds: CGRect,
+        screen: CGRect,
+        layer: Int,
+        ownerPID: pid_t,
+        ourPID: pid_t
+    ) -> Bool {
+        guard ownerPID != ourPID, ownerPID != 0, layer <= 0 else { return false }
+        return coversScreen(bounds, screen: screen)
+    }
+
+    static func frontmostCovers(_ screen: NSScreen, ourPID: pid_t = ProcessInfo.processInfo.processIdentifier) -> Bool {
+        let frontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0
+        guard frontPID != 0, frontPID != ourPID else { return false }
+        let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+        guard let windows = info as? [[String: Any]] else { return false }
+        let screenFrame = screen.frame
+        for window in windows {
+            let layer = window[kCGWindowLayer as String] as? Int ?? 0
+            let owner = window[kCGWindowOwnerPID as String] as? pid_t ?? 0
+            guard owner == frontPID else { continue }
+            guard let boundsDict = window[kCGWindowBounds as String] as? [String: CGFloat] ??
+                (window[kCGWindowBounds as String] as? NSDictionary) as? [String: CGFloat]
+            else { continue }
+            let candidate = CGRect(x: 0, y: 0, width: boundsDict["Width"] ?? 0, height: boundsDict["Height"] ?? 0)
+            let quartzScreen = CGRect(x: 0, y: 0, width: screenFrame.width, height: screenFrame.height)
+            if isForeignFullscreen(
+                bounds: candidate,
+                screen: quartzScreen,
+                layer: layer,
+                ownerPID: owner,
+                ourPID: ourPID
+            ) {
+                return true
+            }
+        }
+        return false
     }
 }
