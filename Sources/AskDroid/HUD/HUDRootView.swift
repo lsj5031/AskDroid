@@ -111,11 +111,6 @@ struct ExpandedHUD: View {
             if metrics.hasNotch {
                 Color.black
                     .frame(height: metrics.notchHeight)
-                    .overlay {
-                        Text("AskDroid")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(Color.white.opacity(0.28))
-                    }
                     .accessibilityHidden(true)
             }
             header
@@ -137,11 +132,7 @@ struct ExpandedHUD: View {
         .frame(width: Theme.panelWidth, alignment: .topLeading)
         .frame(maxHeight: .infinity, alignment: .top)
         .background {
-            if metrics.hasNotch {
-                Color.black
-            } else {
-                Theme.panelFill
-            }
+            Theme.panelFill
         }
         .overlay {
             if metrics.hasNotch {

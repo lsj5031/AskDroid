@@ -1,8 +1,10 @@
 # AskDroid
 
-Press a hotkey on your Mac. A HUD drops from the notch. Ask Droid, paste images, watch the answer stream, keep a Markdown file.
+Press a hotkey on your Mac. A HUD grows out of the camera housing. Ask Droid, paste images, watch the answer stream, keep a Markdown file.
 
-<img src="docs/screenshots/composer.png" width="560" alt="AskDroid HUD with a question typed in the composer">
+On a notched MacBook the surface uses the real notch size and a Dynamic Island silhouette. External displays and older Macs get a floating capsule instead.
+
+<img src="docs/screenshots/composer.png" width="560" alt="AskDroid expanded from the notch with a question in the composer">
 
 ```
 ⌃⌘D  →  type or paste  →  ⌘Return  →  ~/Library/Application Support/AskDroid/answers/
@@ -33,20 +35,22 @@ To start it at login, open the HUD, click the gear, enable **Launch at login**.
 
 1. Press **⌃⌘D** from any app.
 2. Type a question. Paste or drop images. **⌘Return** asks, **Esc** hides.
-3. While Droid works, the HUD streams the answer. Hide it and a compact pill stays under the notch.
+3. While Droid works, the HUD streams the answer. Hide it and a compact pill stays beside the notch. Hover the pill to peek the panel without stealing focus; click or press the hotkey to type again.
 4. Copy the answer, or open the archived Markdown file.
+
+The HUD is hidden from screenshots and screen recordings (`NSWindow.sharingType` plus a brief hide on ⌘⇧3 / 4 / 5).
 
 The answer streams token by token while the activity log reports what Droid is doing — session startup, hooks, tool calls — alongside elapsed time and token counts:
 
-<img src="docs/screenshots/progress.png" width="560" alt="AskDroid streaming an answer while the activity log shows session milestones">
+<img src="docs/screenshots/progress.png" width="560" alt="AskDroid streaming an answer from the notch while the activity log shows session milestones">
 
 When the turn finishes you get the whole answer, a copy button, and a link to the saved file:
 
-<img src="docs/screenshots/answer.png" width="560" alt="AskDroid showing a finished answer with Copy, Open file, and New buttons">
+<img src="docs/screenshots/answer.png" width="560" alt="AskDroid showing a finished answer with Copy, Open file, and New">
 
 Press **Esc** mid-run and the HUD collapses to a pill that keeps the status under the notch:
 
-<img src="docs/screenshots/pill.png" width="280" alt="AskDroid collapsed to a compact pill reading Thinking with elapsed time">
+<img src="docs/screenshots/pill.png" width="360" alt="AskDroid collapsed beside the notch, showing Thinking and elapsed time">
 
 Files land in **Application Support/AskDroid/answers**:
 
@@ -59,7 +63,7 @@ If two questions finish in the same second, the next file gets a `-2` suffix.
 
 ## Settings
 
-<img src="docs/screenshots/settings.png" width="560" alt="AskDroid settings panel showing hotkey, model, reasoning, autonomy, directories, and launch at login">
+<img src="docs/screenshots/settings.png" width="560" alt="AskDroid settings hanging from the notch, with hotkey, model, reasoning, autonomy, directories, and launch at login">
 
 All optional. Blank means “use Droid’s own defaults.”
 
@@ -80,6 +84,14 @@ Default autonomy is **high**: Droid can edit files, run commands, and push, scop
 ```bash
 swift test
 ```
+
+To refresh the README captures after a HUD change:
+
+```bash
+./scripts/render-screenshots.sh
+```
+
+That launches the app with `ASKDROID_SCREENSHOTS` set, seeds each surface, and writes PNGs into `docs/screenshots/`. Use `ASKDROID_ALLOW_CAPTURE=1` if you need to photograph a live session (privacy hide is on by default).
 
 ## Why not Shortcuts?
 
