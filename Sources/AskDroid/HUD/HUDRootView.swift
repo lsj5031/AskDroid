@@ -4,6 +4,8 @@ import UniformTypeIdentifiers
 
 struct HUDRootView: View {
     @ObservedObject var session: AskSession
+    var metrics: NotchMetrics
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Group {
@@ -15,43 +17,107 @@ struct HUDRootView: View {
                 Color.clear
             }
         }
+        .environment(\.notchMetrics, metrics)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .jellyPulse(isExpanded: session.isExpanded, reduceMotion: reduceMotion)
     }
 }
 
 struct CompactPill: View {
     @ObservedObject var session: AskSession
+    @Environment(\.notchMetrics) private var metrics
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        Button(action: session.present) {
-            HStack(spacing: 8) {
+        Button(action: { session.present(source: .user) }) {
+            if metrics.hasNotch {
+                notchedPill
+            } else {
+                floatingPill
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(session.compactTitle)
+        .animation(NotchMotion.conversion(reduceMotion: reduceMotion), value: session.phase)
+    }
+
+    private var notchedPill: some View {
+        HStack(spacing: 0) {
+            HStack(spacing: 6) {
                 StatusDot(phase: session.phase)
                 Text(session.compactTitle)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(Theme.ink)
                     .lineLimit(1)
-                Spacer(minLength: 8)
+            }
+            .padding(.leading, 10)
+            .frame(width: metrics.compactLeadingWidth, alignment: .leading)
+
+            Color.clear
+                .frame(width: metrics.notchWidth)
+
+            Group {
                 if session.phase == .running {
                     Text(AnswerArchive.formatDuration(session.elapsed))
                         .font(.system(size: 11, weight: .medium).monospacedDigit())
                         .foregroundStyle(Theme.mute)
+                } else {
+                    Image(systemName: session.phase == .failed ? "exclamationmark" : "checkmark")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(session.phase == .failed ? Theme.danger : Theme.success)
                 }
             }
-            .padding(.horizontal, 12)
-            .frame(width: Theme.pillWidth, height: Theme.pillHeight)
-            .background(Theme.pillFill, in: Capsule())
-            .overlay(Capsule().stroke(Theme.hairline, lineWidth: 1))
+            .frame(width: metrics.compactTrailingWidth, alignment: .trailing)
+            .padding(.trailing, 10)
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(session.compactTitle)
+        .frame(height: metrics.compactSize.height)
+        .background(Color.black)
+        .clipShape(NotchShape(
+            topCornerRadius: NotchRadii.compact.top,
+            bottomCornerRadius: NotchRadii.compact.bottom
+        ))
+        .animation(NotchMotion.conversion(reduceMotion: reduceMotion), value: session.phase)
     }
+
+    private var floatingPill: some View {
+        HStack(spacing: 8) {
+            StatusDot(phase: session.phase)
+            Text(session.compactTitle)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Theme.ink)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            if session.phase == .running {
+                Text(AnswerArchive.formatDuration(session.elapsed))
+                    .font(.system(size: 11, weight: .medium).monospacedDigit())
+                    .foregroundStyle(Theme.mute)
+            }
+        }
+        .padding(.horizontal, 12)
+        .frame(width: Theme.pillWidth, height: Theme.pillHeight)
+        .background(Theme.pillFill, in: Capsule())
+        .overlay(Capsule().stroke(Theme.hairline, lineWidth: 1))
+    }
+
 }
 
 struct ExpandedHUD: View {
     @ObservedObject var session: AskSession
+    @Environment(\.notchMetrics) private var metrics
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if metrics.hasNotch {
+                Color.black
+                    .frame(height: metrics.notchHeight)
+                    .overlay {
+                        Text("AskDroid")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Color.white.opacity(0.28))
+                    }
+                    .accessibilityHidden(true)
+            }
             header
             Divider().overlay(Theme.hairline)
             if session.isSettingsOpen {
@@ -70,12 +136,36 @@ struct ExpandedHUD: View {
         }
         .frame(width: Theme.panelWidth, alignment: .topLeading)
         .frame(maxHeight: .infinity, alignment: .top)
-        .background(Theme.panelFill)
-        .overlay(
-            RoundedRectangle(cornerRadius: Theme.panelCorner, style: .continuous)
+        .background {
+            if metrics.hasNotch {
+                Color.black
+            } else {
+                Theme.panelFill
+            }
+        }
+        .overlay {
+            if metrics.hasNotch {
+                NotchShape(
+                    topCornerRadius: NotchRadii.expanded.top,
+                    bottomCornerRadius: NotchRadii.expanded.bottom
+                )
                 .stroke(Theme.hairline, lineWidth: 1)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: Theme.panelCorner, style: .continuous))
+            } else {
+                RoundedRectangle(cornerRadius: Theme.panelCorner, style: .continuous)
+                    .stroke(Theme.hairline, lineWidth: 1)
+            }
+        }
+        .mask {
+            if metrics.hasNotch {
+                NotchShape(
+                    topCornerRadius: NotchRadii.expanded.top,
+                    bottomCornerRadius: NotchRadii.expanded.bottom
+                )
+            } else {
+                RoundedRectangle(cornerRadius: Theme.panelCorner, style: .continuous)
+            }
+        }
+        .animation(NotchMotion.conversion(reduceMotion: reduceMotion), value: session.isSettingsOpen)
         .onDrop(of: [.fileURL, .image, .png, .jpeg, .tiff, .gif, UTType.webP], isTargeted: nil) { providers in
             handleDrop(providers)
         }

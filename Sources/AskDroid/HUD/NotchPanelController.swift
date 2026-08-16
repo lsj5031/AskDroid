@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 import SwiftUI
 
 @MainActor
@@ -11,6 +12,8 @@ final class NotchPanelController {
     private var pinnedDisplayID: UInt32?
     private var lastLoggedFrame = NSRect.zero
     private var lastLoggedScreen = ""
+    private var hoverTask: Task<Void, Never>?
+    private var capturePrivacy: CapturePrivacy?
 
     var debugDescription: String {
         let responder = String(describing: type(of: panel.firstResponder ?? NSNull()))
@@ -22,12 +25,17 @@ final class NotchPanelController {
 
         let chrome = HUDChromeView(frame: NSRect(x: 0, y: 0, width: Theme.panelWidth, height: 260))
         chrome.wantsLayer = true
-        chrome.layer?.backgroundColor = NSColor(red: 0.07, green: 0.07, blue: 0.075, alpha: 1).cgColor
-        chrome.layer?.cornerRadius = Theme.panelCorner
+        chrome.layer?.backgroundColor = NSColor.clear.cgColor
         chrome.layer?.masksToBounds = true
         self.chrome = chrome
 
-        let hosting = NSHostingView(rootView: HUDRootView(session: session))
+        let hosting = NSHostingView(rootView: HUDRootView(session: session, metrics: .from(
+            screenFrame: CGRect(x: 0, y: 0, width: Theme.panelWidth, height: 260),
+            visibleFrame: CGRect(x: 0, y: 0, width: Theme.panelWidth, height: 260),
+            auxiliaryTopLeft: nil,
+            auxiliaryTopRight: nil,
+            safeAreaTop: 0
+        )))
         hosting.wantsLayer = true
         hosting.layer?.backgroundColor = NSColor.clear.cgColor
         hosting.safeAreaRegions = []
@@ -45,9 +53,9 @@ final class NotchPanelController {
         )
         panel.level = .statusBar
         panel.hidesOnDeactivate = false
-        panel.isOpaque = true
-        panel.backgroundColor = NSColor(red: 0.07, green: 0.07, blue: 0.075, alpha: 1)
-        panel.hasShadow = true
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
         panel.alphaValue = 1
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.isMovable = false
@@ -72,8 +80,20 @@ final class NotchPanelController {
             session?.attachFromPasteboard() ?? false
         }
         panel.onRequestFocus = { [weak self] in
+            self?.session.promoteHoverToUser()
             self?.focusEditor(activate: false)
         }
+
+        chrome.onHoverChanged = { [weak self] hovering in
+            self?.handleHover(hovering)
+        }
+
+        let privacy = CapturePrivacy(panel: panel)
+        privacy.onHideChanged = { [weak self] hidden in
+            guard let self, !hidden else { return }
+            self.updateVisibility()
+        }
+        self.capturePrivacy = privacy
 
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
@@ -93,6 +113,10 @@ final class NotchPanelController {
     }
 
     func updateVisibility() {
+        if capturePrivacy?.isCaptureHidden == true {
+            panel.orderOut(nil)
+            return
+        }
         if session.isExpanded {
             showExpanded()
             return
@@ -111,9 +135,13 @@ final class NotchPanelController {
     private func showExpanded() {
         applySize(measuredSize())
         panel.alphaValue = 1
-        stealFocus()
-        focusEditorSoon()
-        AskLog.line("showExpanded \(debugDescription)")
+        if session.presentSource == .user {
+            stealFocus()
+            focusEditorSoon()
+        } else {
+            panel.orderFrontRegardless()
+        }
+        AskLog.line("showExpanded source=\(session.presentSource) \(debugDescription)")
     }
 
     private func showPill() {
@@ -158,38 +186,84 @@ final class NotchPanelController {
         return fallback
     }
 
-    private func measuredSize() -> CGSize {
-        if session.isExpanded {
-            var height: CGFloat = session.isSettingsOpen ? 560 : 280
-            if !session.images.isEmpty { height += 72 }
-            if !session.answer.isEmpty || !session.thinking.isEmpty || !session.runLog.isEmpty || session.phase == .running || session.phase == .failed {
-                height += 220
-            }
-            return CGSize(width: Theme.panelWidth, height: min(height, 640))
+    private func currentMetrics() -> NotchMetrics {
+        NotchMetrics.from(screen: targetScreen())
+    }
+
+    private func contentHeight() -> CGFloat {
+        var height: CGFloat = session.isSettingsOpen ? 560 : 280
+        if !session.images.isEmpty { height += 72 }
+        if !session.answer.isEmpty || !session.thinking.isEmpty || !session.runLog.isEmpty || session.phase == .running || session.phase == .failed {
+            height += 220
         }
-        return CGSize(width: Theme.pillWidth, height: Theme.pillHeight)
+        return height
+    }
+
+    private func measuredSize() -> CGSize {
+        let metrics = currentMetrics()
+        if session.isExpanded {
+            return metrics.expandedSize(contentHeight: contentHeight())
+        }
+        return metrics.compactSize
     }
 
     private func applySize(_ size: CGSize) {
         let screen = targetScreen()
-        let visible = screen.visibleFrame
-        let width = min(size.width.rounded(), visible.width - 24)
-        let height = min(size.height.rounded(), visible.height - 24)
-        let x = visible.midX - width / 2
-        let y = min(visible.maxY - height - 16, visible.maxY - height)
-        var next = NSRect(x: x, y: max(visible.minY + 8, y), width: width, height: height)
-        if !visible.intersects(next) {
-            next.origin.x = visible.midX - width / 2
-            next.origin.y = visible.midY - height / 2
+        let metrics = NotchMetrics.from(screen: screen)
+        hosting.rootView = HUDRootView(session: session, metrics: metrics)
+        var next = metrics.frame(for: CGSize(width: size.width.rounded(), height: size.height.rounded()), expanded: session.isExpanded)
+        if !screen.frame.intersects(next) {
+            next.origin.x = screen.frame.midX - next.width / 2
+            next.origin.y = screen.frame.maxY - next.height
         }
-        chrome.frame = NSRect(x: 0, y: 0, width: width, height: height)
+        chrome.frame = NSRect(x: 0, y: 0, width: next.width, height: next.height)
         hosting.frame = chrome.bounds
-        panel.setFrame(next, display: true)
+        panel.hasShadow = !metrics.hasNotch
+        animateFrame(to: next)
         let screenName = screen.localizedName
         if next != lastLoggedFrame || screenName != lastLoggedScreen {
             lastLoggedFrame = next
             lastLoggedScreen = screenName
-            AskLog.line("place frame=\(next) visible=\(visible) screen=\(screenName)")
+            AskLog.line("place frame=\(next) notch=\(metrics.hasNotch) screen=\(screenName)")
+        }
+    }
+
+    private func handleHover(_ hovering: Bool) {
+        hoverTask?.cancel()
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let delay = hovering ? 0.16 : 0.28
+        hoverTask = Task { [weak self] in
+            if !reduceMotion {
+                try? await Task.sleep(for: .seconds(delay))
+            }
+            guard !Task.isCancelled, let self else { return }
+            if hovering {
+                let canPeek = !self.session.isExpanded
+                    && (self.session.phase == .running || self.session.phase == .completed || self.session.phase == .failed)
+                if canPeek {
+                    self.session.present(source: .hover)
+                    self.updateVisibility()
+                }
+            } else {
+                self.session.dismissHoverIfNeeded()
+                self.updateVisibility()
+            }
+        }
+    }
+
+    private func animateFrame(to next: NSRect) {
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        NSAnimationContext.runAnimationGroup { context in
+            if reduceMotion {
+                context.duration = 0.12
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            } else {
+                // Underdamped ease so the window overshoots slightly like Island jelly.
+                context.duration = 0.42
+                context.timingFunction = CAMediaTimingFunction(controlPoints: 0.16, 1.18, 0.32, 1)
+            }
+            context.allowsImplicitAnimation = !reduceMotion
+            panel.animator().setFrame(next, display: true)
         }
     }
 
@@ -233,6 +307,33 @@ final class NotchPanelController {
 
 final class HUDChromeView: NSView {
     var onDropPasteboard: ((NSPasteboard) -> Bool)?
+    var onHoverChanged: ((Bool) -> Void)?
+    private var tracking: NSTrackingArea?
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking {
+            removeTrackingArea(tracking)
+        }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(area)
+        tracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        onHoverChanged?(true)
+        super.mouseEntered(with: event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        onHoverChanged?(false)
+        super.mouseExited(with: event)
+    }
 
     override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
         AttachedImage.fromPasteboard(sender.draggingPasteboard).isEmpty ? [] : .copy

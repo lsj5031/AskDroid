@@ -310,6 +310,62 @@ final class AttachedImageTests: XCTestCase {
     }
 }
 
+final class NotchMetricsTests: XCTestCase {
+    func testNotchedScreenUsesAuxiliaryAreas() {
+        let screen = CGRect(x: 0, y: 0, width: 1512, height: 982)
+        let visible = CGRect(x: 0, y: 0, width: 1512, height: 944)
+        let metrics = NotchMetrics.from(
+            screenFrame: screen,
+            visibleFrame: visible,
+            auxiliaryTopLeft: 650,
+            auxiliaryTopRight: 650,
+            safeAreaTop: 32
+        )
+        XCTAssertTrue(metrics.hasNotch)
+        XCTAssertEqual(metrics.notchWidth, 212)
+        XCTAssertEqual(metrics.notchHeight, 32)
+        XCTAssertEqual(metrics.notchFrame.origin.y, screen.maxY - 32)
+        XCTAssertEqual(metrics.notchFrame.midX, screen.midX, accuracy: 0.5)
+
+        let compact = metrics.frame(for: metrics.compactSize, expanded: false)
+        XCTAssertEqual(compact.maxY, screen.maxY)
+        XCTAssertEqual(compact.minX, screen.midX - metrics.notchWidth / 2 - metrics.compactLeadingWidth, accuracy: 0.5)
+
+        let expanded = metrics.frame(for: metrics.expandedSize(contentHeight: 400), expanded: true)
+        XCTAssertEqual(expanded.maxY, screen.maxY)
+        XCTAssertEqual(expanded.midX, screen.midX, accuracy: 0.5)
+        XCTAssertEqual(expanded.height, 432)
+    }
+
+    func testNonNotchedScreenFallsBackToVisibleFrame() {
+        let screen = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+        let visible = CGRect(x: 0, y: 0, width: 1920, height: 1055)
+        let metrics = NotchMetrics.from(
+            screenFrame: screen,
+            visibleFrame: visible,
+            auxiliaryTopLeft: nil,
+            auxiliaryTopRight: nil,
+            safeAreaTop: 0
+        )
+        XCTAssertFalse(metrics.hasNotch)
+        let compact = metrics.frame(for: metrics.compactSize, expanded: false)
+        XCTAssertLessThan(compact.maxY, visible.maxY + 0.1)
+        XCTAssertEqual(compact.midX, visible.midX, accuracy: 0.5)
+        XCTAssertEqual(metrics.compactSize.width, Theme.pillWidth)
+    }
+}
+
+final class CapturePrivacyTests: XCTestCase {
+    func testScreenshotChords() {
+        XCTAssertTrue(CapturePrivacy.isScreenshotChord(keyCode: 20, flags: [.command, .shift]))
+        XCTAssertTrue(CapturePrivacy.isScreenshotChord(keyCode: 21, flags: [.command, .shift]))
+        XCTAssertTrue(CapturePrivacy.isScreenshotChord(keyCode: 23, flags: [.command, .shift]))
+        XCTAssertFalse(CapturePrivacy.isScreenshotChord(keyCode: 20, flags: [.command]))
+        XCTAssertFalse(CapturePrivacy.isScreenshotChord(keyCode: 20, flags: [.command, .shift, .option]))
+        XCTAssertFalse(CapturePrivacy.isScreenshotChord(keyCode: 0, flags: [.command, .shift]))
+    }
+}
+
 final class LineReaderTests: XCTestCase {
     func testSplitsCompleteLinesAndKeepsRemainder() {
         let reader = LineReader()
@@ -849,5 +905,39 @@ final class AskSessionTests: XCTestCase {
         XCTAssertEqual(session.images.count, 1)
         XCTAssertEqual(session.images.first?.filename, "small.png")
         XCTAssertNotNil(session.notice)
+    }
+
+    func testHoverPresentDoesNotStealComposerState() {
+        let session = makeSession(launcher: MockLauncher())
+        session.phase = .completed
+        session.present(source: .hover)
+        XCTAssertTrue(session.isExpanded)
+        XCTAssertEqual(session.presentSource, .hover)
+        XCTAssertEqual(session.phase, .completed)
+
+        session.dismissHoverIfNeeded()
+        XCTAssertFalse(session.isExpanded)
+        XCTAssertEqual(session.phase, .completed)
+    }
+
+    func testUserPresentIsNotDismissedByHoverLeave() {
+        let session = makeSession(launcher: MockLauncher())
+        session.present(source: .user)
+        XCTAssertEqual(session.presentSource, .user)
+        session.dismissHoverIfNeeded()
+        XCTAssertTrue(session.isExpanded)
+        session.promoteHoverToUser()
+        XCTAssertEqual(session.presentSource, .user)
+    }
+
+    func testHoverPromotesToUser() {
+        let session = makeSession(launcher: MockLauncher())
+        session.phase = .completed
+        session.present(source: .hover)
+        session.promoteHoverToUser()
+        XCTAssertEqual(session.presentSource, .user)
+        XCTAssertTrue(session.isExpanded)
+        session.dismissHoverIfNeeded()
+        XCTAssertTrue(session.isExpanded)
     }
 }

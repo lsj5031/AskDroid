@@ -8,6 +8,8 @@ enum Theme {
     static let well = Color.black.opacity(0.28)
     static let panelFill = Color(red: 0.07, green: 0.07, blue: 0.075)
     static let pillFill = Color(red: 0.08, green: 0.08, blue: 0.085)
+    static let success = Color(red: 0.45, green: 0.84, blue: 0.52)
+    static let danger = Color(red: 1, green: 0.45, blue: 0.38)
 
     static let panelWidth: CGFloat = 560
     static let pillWidth: CGFloat = 280
