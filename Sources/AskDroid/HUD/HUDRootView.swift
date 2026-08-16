@@ -239,7 +239,7 @@ struct ExpandedHUD: View {
             if let notice = session.notice {
                 Text(notice)
                     .font(.system(size: 11))
-                    .foregroundStyle(Color(red: 1, green: 0.72, blue: 0.42))
+                    .foregroundStyle(Theme.notice)
             }
             HStack {
                 Text("Paste or drop images")
@@ -266,12 +266,12 @@ struct ExpandedHUD: View {
                 if session.phase == .failed, let errorMessage = session.errorMessage {
                     Text(errorMessage)
                         .font(.system(size: 13))
-                        .foregroundStyle(Color(red: 1, green: 0.62, blue: 0.52))
+                        .foregroundStyle(Theme.dangerText)
                 }
                 if let archiveError = session.archiveError {
                     Text(archiveError)
                         .font(.system(size: 13))
-                        .foregroundStyle(Color(red: 1, green: 0.62, blue: 0.52))
+                        .foregroundStyle(Theme.dangerText)
                         .textSelection(.enabled)
                 }
                 if !session.thinking.isEmpty, session.answer.isEmpty || session.phase == .running {
