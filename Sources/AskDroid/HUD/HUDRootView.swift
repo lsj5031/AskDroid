@@ -169,6 +169,18 @@ struct ExpandedHUD: View {
                 RoundedRectangle(cornerRadius: Theme.panelCorner, style: .continuous)
                     .stroke(Theme.hairline, lineWidth: 1)
             }
+            if isDropTargeted {
+                if metrics.hasNotch {
+                    NotchShape(
+                        topCornerRadius: NotchRadii.expanded.top,
+                        bottomCornerRadius: NotchRadii.expanded.bottom
+                    )
+                    .stroke(Theme.accent, lineWidth: 2)
+                } else {
+                    RoundedRectangle(cornerRadius: Theme.panelCorner, style: .continuous)
+                        .stroke(Theme.accent, lineWidth: 2)
+                }
+            }
         }
         .mask {
             if metrics.hasNotch {
@@ -181,7 +193,7 @@ struct ExpandedHUD: View {
             }
         }
         .animation(NotchMotion.conversion(reduceMotion: reduceMotion), value: session.isSettingsOpen)
-        .onDrop(of: [.fileURL, .image, .png, .jpeg, .tiff, .gif, UTType.webP], isTargeted: nil) { providers in
+        .onDrop(of: [.fileURL, .image, .png, .jpeg, .tiff, .gif, UTType.webP], isTargeted: $isDropTargeted) { providers in
             handleDrop(providers)
         }
     }
@@ -276,9 +288,14 @@ struct ExpandedHUD: View {
                     .foregroundStyle(Theme.notice)
             }
             HStack {
-                Text("Paste or drop images")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Theme.mute)
+                Label(
+                    isDropTargeted ? "Release to attach" : "Paste or drop images",
+                    systemImage: isDropTargeted ? "arrow.down.circle" : "paperclip"
+                )
+                .font(.system(size: 11, weight: isDropTargeted ? .medium : .regular))
+                .foregroundStyle(isDropTargeted ? Theme.accent : Theme.mute)
+                .labelStyle(.titleAndIcon)
+                .animation(.easeOut(duration: 0.12), value: isDropTargeted)
                 Spacer()
                 Button("Ask", action: session.submit)
                     .buttonStyle(PrimaryButtonStyle())
