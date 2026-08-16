@@ -2,15 +2,33 @@ import AppKit
 import SwiftUI
 
 /// Hardware-accurate notch (or menu-bar fallback) used to pin the HUD.
+///
+/// Measured cutout geometry, in points at the current scaling:
+///  - 14-inch MacBook Pro: 185 × 32
+///  - 16-inch MacBook Pro: 220 × 38
+/// The lens is ~12.2% of the screen width on every notched model, and its
+/// corners are ~4 pt on top and ~8 pt on the bottom (the bottom flares wider).
+/// `NSScreen.safeAreaInsets.top` reports the exact lens height — not a loose
+/// menu-bar inset — so it is the vertical measure; the horizontal span is
+/// measured directly from the menu-bar ears.
 struct NotchMetrics: Equatable, Sendable {
     var hasNotch: Bool
     var notchWidth: CGFloat
     var notchHeight: CGFloat
+    /// Absolute screen-space X of the lens's left edge, measured from the
+    /// menu-bar ears rather than assumed perfectly centered at midX.
+    var notchLeftEdge: CGFloat
     var menubarHeight: CGFloat
     var screenFrame: CGRect
     var visibleFrame: CGRect
 
     static let fallbackNotchWidth: CGFloat = 300
+
+    /// Physical cutout corner radii (approx): the top corners are squarer and
+    /// the bottom corners flare wider. Named for any surface that redraws the
+    /// lens itself.
+    static let notchTopCornerRadius: CGFloat = 4
+    static let notchBottomCornerRadius: CGFloat = 8
 
     /// 14-inch MacBook-style notch used for README captures so the Island
     /// silhouette is visible even on a non-notched display.
@@ -26,12 +44,15 @@ struct NotchMetrics: Equatable, Sendable {
         var copy = self
         copy.screenFrame = screen.frame
         copy.visibleFrame = screen.visibleFrame
+        // Re-center the measured lens on the target screen (the marketing
+        // metrics carry a synthetic origin).
+        copy.notchLeftEdge = screen.frame.midX - copy.notchWidth / 2
         return copy
     }
 
     var notchFrame: CGRect {
         CGRect(
-            x: screenFrame.midX - notchWidth / 2,
+            x: notchLeftEdge,
             y: screenFrame.maxY - notchHeight,
             width: notchWidth,
             height: notchHeight
@@ -78,10 +99,10 @@ struct NotchMetrics: Equatable, Sendable {
         if hasNotch {
             let x: CGFloat
             if expanded {
-                x = screenFrame.midX - width / 2
+                x = notchFrame.midX - width / 2
             } else {
                 // Keep the physical notch centered; wings grow left/right.
-                x = screenFrame.midX - notchWidth / 2 - compactLeadingWidth
+                x = notchFrame.minX - compactLeadingWidth
             }
             let y = screenFrame.maxY - height
             return CGRect(x: x, y: y, width: width, height: height)
@@ -115,11 +136,15 @@ struct NotchMetrics: Equatable, Sendable {
         if let left = auxiliaryTopLeft, let right = auxiliaryTopRight,
            looksLikeHardwareNotch(left: left, right: right, safeAreaTop: safeAreaTop, screenWidth: screenFrame.width)
         {
-            let width = screenFrame.width - left - right
+            // The ears run from the screen's left/right edges to the camera
+            // housing, so the lens spans [minX + left, maxX - right] exactly.
+            let notchLeft = screenFrame.minX + left
+            let notchRight = screenFrame.maxX - right
             return NotchMetrics(
                 hasNotch: true,
-                notchWidth: width,
+                notchWidth: notchRight - notchLeft,
                 notchHeight: safeAreaTop,
+                notchLeftEdge: notchLeft,
                 menubarHeight: menubarHeight,
                 screenFrame: screenFrame,
                 visibleFrame: visibleFrame
@@ -129,6 +154,7 @@ struct NotchMetrics: Equatable, Sendable {
             hasNotch: false,
             notchWidth: fallbackNotchWidth,
             notchHeight: max(menubarHeight, 24),
+            notchLeftEdge: screenFrame.midX - fallbackNotchWidth / 2,
             menubarHeight: menubarHeight,
             screenFrame: screenFrame,
             visibleFrame: visibleFrame

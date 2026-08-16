@@ -57,6 +57,10 @@ struct CompactPill: View {
 
             Color.black
                 .frame(width: metrics.notchWidth)
+                .clipShape(NotchShape(
+                    topCornerRadius: NotchMetrics.notchTopCornerRadius,
+                    bottomCornerRadius: NotchMetrics.notchBottomCornerRadius
+                ))
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
 
