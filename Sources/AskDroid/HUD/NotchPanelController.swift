@@ -124,6 +124,7 @@ final class NotchPanelController {
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
             if event.keyCode == 53 {
+                if HotkeyCenter.shared.isRecordingShortcut { return event }
                 self.session.dismiss()
                 return nil
             }
@@ -156,22 +157,24 @@ final class NotchPanelController {
     }
 
     func updateVisibility() {
-        if capturePrivacy?.isCaptureHidden == true {
+        let userSummoned = session.isExpanded && session.presentSource == .user
+        let captureHidden = capturePrivacy?.isCaptureHidden == true
+        let fullscreen = !CapturePrivacy.isDisabled && DisplayOccupation.frontmostCovers(targetScreen())
+        if DisplayOccupation.shouldHidePassiveSurface(
+            captureHidden: captureHidden,
+            fullscreenCovered: fullscreen,
+            userSummoned: userSummoned
+        ) {
             panel.orderOut(nil)
-            return
-        }
-        if !CapturePrivacy.isDisabled, DisplayOccupation.frontmostCovers(targetScreen()) {
-            panel.orderOut(nil)
-            AskLog.line("hide for fullscreen")
+            if fullscreen { AskLog.line("hide for fullscreen") }
+            syncClickThrough()
             return
         }
         if session.isExpanded {
-            // Steal focus only when the surface transitions to expanded, i.e. the
-            // user actually summoned it. Phase changes (running → completed) while
-            // already open must not yank focus away from whatever they're doing.
             let newlyExpanded = !wasExpanded
             wasExpanded = true
             showExpanded(shouldStealFocus: newlyExpanded)
+            syncClickThrough()
             return
         }
         wasExpanded = false
@@ -180,6 +183,7 @@ final class NotchPanelController {
         } else {
             hide()
         }
+        syncClickThrough()
     }
 
     func reposition() {
@@ -187,6 +191,7 @@ final class NotchPanelController {
     }
 
     private func showExpanded(shouldStealFocus: Bool = true) {
+        panel.ignoresMouseEvents = false
         applySize(measuredSize())
         panel.alphaValue = 1
         if shouldStealFocus, session.presentSource == .user {
@@ -206,6 +211,7 @@ final class NotchPanelController {
     }
 
     private func hide() {
+        panel.ignoresMouseEvents = false
         panel.orderOut(nil)
         AskLog.line("hide")
     }
@@ -333,11 +339,7 @@ final class NotchPanelController {
         let metrics = currentMetrics()
         let metricsChanged = metrics != lastMetrics
         let sizeChanged = size != lastAppliedSize
-        // Repositioning is wired to streamed state (run log, answer, images), so it
-        // fires far more often than the geometry actually changes. Rebuilding the
-        // SwiftUI root view on every event recreates the prompt NSTextView, losing
-        // cursor/undo state and re-stealing focus, so only touch the tree when the
-        // metrics or measured size genuinely moved.
+        // Streamed tokens change state more often than geometry.
         guard metricsChanged || sizeChanged else { return }
 
         if metricsChanged {

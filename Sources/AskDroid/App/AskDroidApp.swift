@@ -127,6 +127,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         if status != noErr {
             session.notice = "Could not exclusively register \(session.settings.hotkeyDisplay). A fallback listener is on; another app may already own that shortcut."
             AskLog.line("hotkey register failed status=\(status)")
+        } else if session.notice?.contains("Could not exclusively register") == true {
+            session.notice = nil
         }
     }
 
