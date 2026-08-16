@@ -86,6 +86,64 @@ final class JSONRPCTests: XCTestCase {
         }
     }
 
+    func testNotificationParserMapsSessionMilestones() {
+        let mcp: [String: Any] = [
+            "method": "droid.session_notification",
+            "params": ["notification": [
+                "type": "mcp_status_changed",
+                "summary": ["total": 0, "connected": 0, "connecting": 0, "failed": 0, "disabled": 0],
+            ]],
+        ]
+        if case .milestone(let text) = DroidNotificationParser.parse(mcp) {
+            XCTAssertEqual(text, "No MCP servers configured")
+        } else {
+            XCTFail("expected mcp milestone")
+        }
+
+        let hookStart: [String: Any] = [
+            "method": "droid.session_notification",
+            "params": ["notification": ["type": "hook_execution_started", "hookEventName": "SessionStart"]],
+        ]
+        if case .milestone(let text) = DroidNotificationParser.parse(hookStart) {
+            XCTAssertEqual(text, "Running SessionStart hook…")
+        } else {
+            XCTFail("expected hook milestone")
+        }
+
+        let hookDone: [String: Any] = [
+            "method": "droid.session_notification",
+            "params": ["notification": [
+                "type": "hook_execution_completed",
+                "hookEventName": "SessionStart",
+                "hookStatus": "completed",
+            ]],
+        ]
+        if case .milestone(let text) = DroidNotificationParser.parse(hookDone) {
+            XCTAssertEqual(text, "SessionStart hook completed")
+        } else {
+            XCTFail("expected hook completed milestone")
+        }
+
+        let settings: [String: Any] = [
+            "method": "droid.session_notification",
+            "params": ["notification": ["type": "settings_updated", "settings": [:]]],
+        ]
+        if case .milestone(let text) = DroidNotificationParser.parse(settings) {
+            XCTAssertEqual(text, "Session settings loaded")
+        } else {
+            XCTFail("expected settings milestone")
+        }
+
+        let createMessage: [String: Any] = [
+            "method": "droid.session_notification",
+            "params": ["notification": ["type": "create_message", "message": [:]]],
+        ]
+        guard case .ignored = DroidNotificationParser.parse(createMessage) else {
+            XCTFail("create_message should stay ignored")
+            return
+        }
+    }
+
     func testNotificationParserReadsToolCallDetail() {
         let tool: [String: Any] = [
             "params": [
@@ -490,6 +548,46 @@ final class EngineStateMachineTests: XCTestCase {
         try? FileManager.default.removeItem(at: answers)
     }
 
+    func testLargeInitResponseLineIsProcessed() async {
+        // Regression: the real initialize response is a single ~20 KB line, larger
+        // than the old 16 KB read chunk. read(upToCount:) blocked waiting for a full
+        // chunk and the run deadlocked; availableData must deliver it in pieces.
+        let launcher = MockLauncher()
+        let engine = DroidEngine(launcher: launcher, fileExists: { _ in true })
+        let box = EventBox()
+        let answers = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        var settings = Self.makeSettings()
+        settings.answersDirectory = answers.path
+
+        let bigModel = String(repeating: "x", count: 20_000)
+        let initLine = #"{"jsonrpc":"2.0","id":"1","result":{"session":{"settings":{"modelId":""#
+            + bigModel + #""}}}}"#
+
+        let driver = Task.detached {
+            await waitForProcesses(launcher, count: 1)
+            let process = launcher.processes[0]
+            process.feedStdout(initLine)
+            try? await Task.sleep(for: .milliseconds(300))
+            process.feedStdout(#"{"jsonrpc":"2.0","method":"droid.session_notification","params":{"type":"assistant_text_delta","textDelta":"ok"}}"#)
+            process.feedStdout(#"{"jsonrpc":"2.0","method":"droid.session_notification","params":{"type":"agent_turn_completed","durationMs":5}}"#)
+            process.closeStdout()
+            process.closeStderr()
+            process.setExit(0)
+        }
+
+        await runEngine(engine, request: DroidRunRequest(prompt: "hi", images: [], settings: settings), box: box)
+        await driver.value
+
+        let written = launcher.processes[0].written.joined()
+        XCTAssertTrue(written.contains(#""id":"2"#), "engine never answered the large init response")
+        let result = box.snapshot().compactMap { event -> DroidRunResult? in
+            if case .completed(_, let r) = event { return r }
+            return nil
+        }.last
+        XCTAssertEqual(result?.text, "ok")
+        try? FileManager.default.removeItem(at: answers)
+    }
+
     func testRunIDsAreUniquePerRun() async {
         let launcher = MockLauncher()
         let engine = DroidEngine(launcher: launcher, fileExists: { _ in true })
@@ -609,8 +707,57 @@ final class EngineStateMachineTests: XCTestCase {
     }
 }
 
+final class RealDroidIntegrationTests: XCTestCase {
+    /// Runs the real droid CLI through the production engine and launcher.
+    /// Skipped unless ASKDROID_INTEGRATION=1 is set.
+    func testRealDroidEndToEnd() async throws {
+        guard ProcessInfo.processInfo.environment["ASKDROID_INTEGRATION"] == "1" else {
+            throw XCTSkip("Set ASKDROID_INTEGRATION=1 to run against the real droid CLI")
+        }
+        let engine = DroidEngine()
+        let box = EventBox()
+        var settings = AppSettings.default
+        settings.answersDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString).path
+
+        await runEngine(
+            engine,
+            request: DroidRunRequest(prompt: "Reply with exactly: ok", images: [], settings: settings),
+            box: box
+        )
+
+        let failure = box.snapshot().compactMap { event -> String? in
+            if case .failed(_, let message) = event { return message }
+            return nil
+        }.last
+        XCTAssertNil(failure, "run failed: \(failure ?? "")")
+        let result = box.snapshot().compactMap { event -> DroidRunResult? in
+            if case .completed(_, let r) = event { return r }
+            return nil
+        }.last
+        let logLines = box.snapshot().compactMap { event -> String? in
+            if case .log(_, let text) = event { return text }
+            return nil
+        }
+        XCTAssertNotNil(result, "no completion event; log: \(logLines)")
+        XCTAssertFalse(result?.text.isEmpty ?? true, "empty answer")
+    }
+}
+
 @MainActor
 final class AskSessionTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        AskLog.setDirectoryOverrideForTesting(
+            FileManager.default.temporaryDirectory.appendingPathComponent("AskDroidTests-logs", isDirectory: true)
+        )
+    }
+
+    override func tearDown() {
+        AskLog.setDirectoryOverrideForTesting(nil)
+        super.tearDown()
+    }
+
     private func makeSession(launcher: MockLauncher) -> AskSession {
         var settings = AppSettings.default
         settings.droidPath = "/tmp/droid"

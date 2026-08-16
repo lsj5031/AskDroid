@@ -218,6 +218,7 @@ actor DroidEngine {
 
             let initTimeout = Task {
                 try? await Task.sleep(for: .seconds(25))
+                guard !Task.isCancelled else { return }
                 if await !session.didInitialize, await !session.isFinished {
                     await session.mark(error: "Droid did not start a session in time.")
                     process.terminate()
@@ -226,15 +227,21 @@ actor DroidEngine {
 
             let turnTimeout = Task {
                 try? await Task.sleep(for: .seconds(600))
+                guard !Task.isCancelled else { return }
                 if await !session.isFinished {
                     await session.mark(error: "Droid did not finish in 10 minutes.")
                     process.terminate()
                 }
             }
 
+            // NOTE: read(upToCount:) blocks until the buffer is full or EOF, which
+            // deadlocks on lines larger than the chunk size (the initialize response
+            // is a single ~20 KB line). availableData returns whatever is in the pipe.
             let stdoutTask = Task.detached {
                 let reader = LineReader()
-                while let data = try? process.standardOutput.read(upToCount: 16_384), !data.isEmpty {
+                while true {
+                    let data = process.standardOutput.availableData
+                    if data.isEmpty { break }
                     for line in reader.push(data) {
                         await self.handle(line: line, process: process, session: session, runID: runID, onEvent: onEvent)
                         if await session.isFinished { return }
@@ -244,7 +251,9 @@ actor DroidEngine {
 
             let stderrTask = Task.detached {
                 let reader = LineReader()
-                while let data = try? process.standardError.read(upToCount: 16_384), !data.isEmpty {
+                while true {
+                    let data = process.standardError.availableData
+                    if data.isEmpty { break }
                     for line in reader.push(data) {
                         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !trimmed.isEmpty else { continue }
@@ -392,6 +401,8 @@ actor DroidEngine {
             let label = Self.workingLabel(for: state)
             onEvent(.activity(runID, label))
             onEvent(.log(runID, label))
+        case .milestone(let text):
+            onEvent(.log(runID, text))
         case .error(let message):
             onEvent(.log(runID, message))
             await session.mark(error: message)
@@ -401,7 +412,9 @@ actor DroidEngine {
             await emitCompletion(session: session, runID: runID, onEvent: onEvent)
             process.terminate()
         case .ignored:
-            if let method = message["method"] as? String {
+            // Unknown session_notification subtypes are noise; anything else with a
+            // method name is worth surfacing for diagnostics.
+            if let method = message["method"] as? String, method != "droid.session_notification" {
                 onEvent(.log(runID, method.replacingOccurrences(of: "droid.", with: "")))
             }
         }
@@ -567,7 +580,10 @@ private actor RunSession {
     }
 
     func mark(error: String) {
-        lastError = error
+        // First error wins: every mark() is followed by terminate(), so a later
+        // mark (e.g. from a timeout racing process teardown) would only mask the
+        // real cause.
+        if lastError == nil { lastError = error }
     }
 
     func complete(durationMs: Double?, tokenUsage: TokenUsage?) {
