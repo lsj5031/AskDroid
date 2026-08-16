@@ -1031,4 +1031,11 @@ final class AskSessionTests: XCTestCase {
         XCTAssertFalse(session.isExpanded)
         XCTAssertEqual(session.phase, .completed)
     }
+
+    func testFailedCompactTitleStaysScannable() {
+        let session = makeSession(launcher: MockLauncher())
+        session.phase = .failed
+        session.errorMessage = "Droid hit a connection error and could not reach the model."
+        XCTAssertEqual(session.compactTitle, "Failed")
+    }
 }

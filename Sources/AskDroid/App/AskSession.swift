@@ -50,6 +50,8 @@ final class AskSession: ObservableObject {
         !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !images.isEmpty
     }
 
+    /// Short status text for the passive pill. Detailed failures stay in the
+    /// expanded panel so the pill remains scannable at notch width.
     var compactTitle: String {
         switch phase {
         case .running:
@@ -57,7 +59,7 @@ final class AskSession: ObservableObject {
         case .completed:
             "Done"
         case .failed:
-            errorMessage ?? "Failed"
+            "Failed"
         default:
             "AskDroid"
         }

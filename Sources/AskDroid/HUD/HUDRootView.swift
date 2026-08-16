@@ -37,7 +37,8 @@ struct CompactPill: View {
             }
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(session.compactTitle)
+        .accessibilityLabel(session.phase == .failed ? "AskDroid failed" : session.compactTitle)
+        .accessibilityHint("Click to open AskDroid")
         .animation(NotchMotion.conversion(reduceMotion: reduceMotion), value: session.phase)
     }
 
@@ -104,10 +105,16 @@ struct CompactPill: View {
                 .foregroundStyle(Theme.ink)
                 .lineLimit(1)
             Spacer(minLength: 8)
-            if session.phase == .running {
-                Text(AnswerArchive.formatDuration(session.elapsed))
-                    .font(.system(size: 11, weight: .medium).monospacedDigit())
-                    .foregroundStyle(Theme.mute)
+            Group {
+                if session.phase == .running {
+                    Text(AnswerArchive.formatDuration(session.elapsed))
+                        .font(.system(size: 11, weight: .medium).monospacedDigit())
+                        .foregroundStyle(Theme.mute)
+                } else {
+                    Image(systemName: session.phase == .failed ? "exclamationmark" : "checkmark")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(session.phase == .failed ? Theme.danger : Theme.success)
+                }
             }
         }
         .padding(.horizontal, 12)
