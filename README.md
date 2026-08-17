@@ -10,6 +10,13 @@ On a notched MacBook the surface uses the real notch size and a Dynamic Island s
 
 <img src="docs/screenshots/composer.png" width="560" alt="AskDroid expanded from the notch with a question in the composer">
 
+**Watch it in action:**
+
+<video controls width="560" preload="none">
+  <source src="https://raw.githubusercontent.com/lsj5031/AskDroid/main/docs/demo.mp4" type="video/mp4">
+  Your browser does not support HTML5 video. <a href="docs/demo.mp4">Download the demo</a>.
+</video>
+
 ```
 ⌃⌘D  →  type or paste  →  ⌘Return  →  ~/Library/Application Support/AskDroid/answers/
 ```
