@@ -12,10 +12,7 @@ On a notched MacBook the surface uses the real notch size and a Dynamic Island s
 
 **Watch it in action:**
 
-<video controls width="560" preload="none">
-  <source src="https://raw.githubusercontent.com/lsj5031/AskDroid/main/docs/demo.mp4" type="video/mp4">
-  Your browser does not support HTML5 video. <a href="docs/demo.mp4">Download the demo</a>.
-</video>
+<img src="docs/demo.gif" width="560" alt="AskDroid: press the hotkey, type a question, and watch the answer stream from the notch">
 
 ```
 ⌃⌘D  →  type or paste  →  ⌘Return  →  ~/Library/Application Support/AskDroid/answers/
