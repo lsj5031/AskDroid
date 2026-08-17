@@ -44,7 +44,6 @@ final class NotchPanelController {
         hosting.layer?.backgroundColor = NSColor.clear.cgColor
         hosting.layer?.isOpaque = false
         hosting.safeAreaRegions = []
-        hosting.sizingOptions = []
         hosting.frame = chrome.bounds
         hosting.autoresizingMask = [.width, .height]
         chrome.addSubview(hosting)
@@ -251,23 +250,21 @@ final class NotchPanelController {
         NotchMetrics.from(screen: targetScreen())
     }
 
-    private func contentHeight() -> CGFloat {
+    private func contentHeight(metrics: NotchMetrics) -> CGFloat {
         if session.isSettingsOpen { return Theme.settingsContentHeight }
-        if session.phase == .completed || session.phase == .failed {
-            // Settle to the rendered content so a one-line answer does not leave
-            // a tall void under it. Falls back to the fixed reserve if the
-            // hosting view has not laid out yet.
-            if let measured = settledContentHeight() {
-                return max(Theme.composerContentHeight, measured)
-            }
-            return Theme.composerContentHeight + Theme.answerBlockHeight
+        // Streaming answers reflow every frame; keep the fixed reserve so the
+        // window doesn't resize continuously while text scrolls in.
+        if session.phase == .running {
+            return PanelLayout.fallbackContentHeight(for: session)
         }
-        var height = Theme.composerContentHeight
-        if !session.images.isEmpty { height += Theme.imageStripHeight }
-        if session.phase == .running || !session.answer.isEmpty {
-            height += Theme.answerBlockHeight
+        // Settle to the rendered content (composing, completed, failed) so a
+        // one-line prompt or answer doesn't leave a tall void under it. The
+        // hosting measurement includes the notch spacer, so subtract it back
+        // out — `expandedSize` adds it once.
+        if let measured = settledContentHeight() {
+            return PanelLayout.expandedContentHeight(fromHostingHeight: measured, metrics: metrics)
         }
-        return height
+        return PanelLayout.fallbackContentHeight(for: session)
     }
 
     /// Ideal expanded content height from the live SwiftUI hierarchy, or nil
@@ -282,7 +279,7 @@ final class NotchPanelController {
     private func measuredSize() -> CGSize {
         let metrics = currentMetrics()
         if session.isExpanded {
-            return metrics.expandedSize(contentHeight: contentHeight())
+            return metrics.expandedSize(contentHeight: contentHeight(metrics: metrics))
         }
         return metrics.compactSize
     }

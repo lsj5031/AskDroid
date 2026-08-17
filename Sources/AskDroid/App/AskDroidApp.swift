@@ -50,6 +50,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
 
+        // The composer field hugs its content; keep the panel hugging the
+        // field as the prompt grows and shrinks.
+        session.$prompt
+            .map(\.count)
+            .removeDuplicates()
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.panel?.reposition()
+            }
+            .store(in: &cancellables)
+
         session.$answer
             .map { !$0.isEmpty }
             .removeDuplicates()

@@ -65,7 +65,7 @@ public enum ScreenshotRender {
 
     private static func contentHeight(_ session: AskSession) -> CGFloat {
         if session.isSettingsOpen { return Theme.settingsContentHeight }
-        if session.phase == .completed || session.phase == .failed {
+        if session.phase != .running {
             let probe = NSHostingView(
                 rootView: HUDRootView(session: session, metrics: .marketing)
                     .frame(width: Theme.panelWidth)
@@ -74,15 +74,11 @@ public enum ScreenshotRender {
             probe.layoutSubtreeIfNeeded()
             let measured = probe.fittingSize.height
             if measured > 0, measured.isFinite, measured < Theme.maxExpandedHeight {
-                return max(Theme.composerContentHeight, measured)
+                // The probe includes the notch spacer; expandedSize re-adds it.
+                return PanelLayout.expandedContentHeight(fromHostingHeight: measured, metrics: .marketing)
             }
-            return Theme.composerContentHeight + Theme.answerBlockHeight
         }
-        var height = Theme.composerContentHeight
-        if session.phase == .running || session.phase == .failed || !session.answer.isEmpty {
-            height += Theme.answerBlockHeight
-        }
-        return height
+        return PanelLayout.fallbackContentHeight(for: session)
     }
 
     private static func rasterize<V: View>(_ view: V, size: CGSize) -> Data? {

@@ -135,6 +135,7 @@ struct ExpandedHUD: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isDropTargeted = false
     @State private var activityLogExpanded = false
+    @State private var fieldFocused = false
     @State private var answerContentHeight: CGFloat = 0
     @State private var answerContentMinY: CGFloat = 0
     @State private var answerViewportHeight: CGFloat = 0
@@ -273,28 +274,22 @@ struct ExpandedHUD: View {
                 .frame(height: 64)
             }
 
-            ZStack(alignment: .topLeading) {
-                if session.prompt.isEmpty {
-                    Text(session.images.isEmpty ? "Ask Droid anything" : "Add a note, or just send the image")
-                        .font(.system(size: 15))
-                        .foregroundStyle(Theme.mute)
-                        .padding(.horizontal, 12)
-                        .padding(.top, 10)
-                        .allowsHitTesting(false)
-                }
-                PromptEditor(
-                    text: $session.prompt,
-                    onSubmit: session.submit,
-                    onPasteImages: { session.attachFromPasteboard() }
-                )
-                .frame(minHeight: 52, maxHeight: 88)
-                .padding(.horizontal, 12)
-                .contentShape(Rectangle())
-            }
-            .background(Theme.well, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            PromptEditor(
+                text: $session.prompt,
+                placeholder: session.images.isEmpty ? "Ask Droid anything" : "Add a note, or just send the image",
+                onSubmit: session.submit,
+                onPasteImages: { session.attachFromPasteboard() },
+                onFocusChange: { fieldFocused = $0 }
+            )
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(minHeight: Theme.fieldMinHeight, maxHeight: Theme.fieldMaxHeight)
+            .contentShape(Rectangle())
+            // All of the field's chrome (well fill and focus border) lives in
+            // SwiftUI, driven by the focus state the AppKit editor reports up.
+            .background(Theme.well, in: RoundedRectangle(cornerRadius: Theme.fieldCorner, style: .continuous))
             .overlay {
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(Theme.hairline, lineWidth: 1)
+                RoundedRectangle(cornerRadius: Theme.fieldCorner, style: .continuous)
+                    .stroke(fieldFocused ? Theme.accent.opacity(0.85) : Theme.hairline, lineWidth: 1)
             }
 
             if let notice = session.notice {
@@ -400,6 +395,9 @@ struct ExpandedHUD: View {
                     }
                 }
                 .frame(maxHeight: 280)
+                // Stay pinned to the bottom while streaming so new text is
+                // always visible; the user can scroll up to detach.
+                .defaultScrollAnchor(.bottom)
                 .coordinateSpace(name: AnswerScrollSpace.name)
                 .background {
                     GeometryReader { proxy in
@@ -442,16 +440,7 @@ struct ExpandedHUD: View {
                     activityLogExpanded = true
                 }
             }
-            .onChange(of: session.answer.count) { _, _ in
-                if session.phase == .running, answerIsNearBottom {
-                    followAnswer(proxy)
-                }
-            }
-            .onChange(of: session.thinking.count) { _, _ in
-                if session.phase == .running, answerIsNearBottom {
-                    followAnswer(proxy)
-                }
-            }
+
         }
     }
 
@@ -595,3 +584,4 @@ struct ImageChip: View {
         }
     }
 }
+

@@ -23,6 +23,16 @@ enum Theme {
     static let panelCorner: CGFloat = 18
     static let pillCorner: CGFloat = 17
 
+    /// Composer field chrome and text insets. The caret and the placeholder
+    /// share these values (the placeholder is drawn by the text view at the
+    /// insertion point), so text can never drift from the field's visual
+    /// chrome the way a separately-padded overlay can.
+    static let fieldCorner: CGFloat = 10
+    static let fieldInset: CGFloat = 12
+    static let fieldVerticalInset: CGFloat = 12
+    static let fieldMinHeight: CGFloat = 44
+    static let fieldMaxHeight: CGFloat = 88
+
     /// Corner radius and vertical padding for the settings controls' wells.
     static let settingsControlCorner: CGFloat = 8
     static let settingsControlPadding: CGFloat = 8
@@ -32,4 +42,7 @@ enum Theme {
     static let imageStripHeight: CGFloat = 72
     static let answerBlockHeight: CGFloat = 240
     static let maxExpandedHeight: CGFloat = 780
+    /// Floor for a measured expanded content height, so a transient bogus
+    /// measurement can never collapse the panel below a usable size.
+    static let minExpandedContentHeight: CGFloat = 160
 }
