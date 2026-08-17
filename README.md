@@ -2,6 +2,8 @@
 
 Press a hotkey on your Mac. A HUD grows out of the camera housing. Ask Droid, paste images, watch the answer stream, keep a Markdown file.
 
+> **Not an official Factory product.** AskDroid is an independent, open-source client for your own local `droid` CLI. It is not created by or affiliated with [Factory](https://factory.ai), and Factory does not endorse or support it.
+
 On a notched MacBook the surface uses the real notch size and a Dynamic Island silhouette. External displays and older Macs get a floating capsule instead.
 
 <img src="docs/screenshots/composer.png" width="560" alt="AskDroid expanded from the notch with a question in the composer">
