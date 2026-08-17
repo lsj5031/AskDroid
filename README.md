@@ -24,6 +24,8 @@ AskDroid is a native Swift/SwiftUI agent app. It does not replace Droid. It talk
 
 **From a release (recommended):** download the latest `AskDroid-<version>-macOS.zip` from the Releases page, unzip, and move `AskDroid.app` to `/Applications`.
 
+The builds are ad-hoc signed (no Developer ID), so Gatekeeper may block the first launch of a downloaded copy. Right-click **AskDroid** in Finder → **Open**, or run `xattr -dr com.apple.quarantine "/Applications/AskDroid.app"`. Notarized builds are planned.
+
 **From source:** see [Build](#build) below.
 
 The app is an accessory process: no Dock icon, no menu bar item. The hotkey is the front door — after launching, press **⌃⌘D** and the HUD appears.
