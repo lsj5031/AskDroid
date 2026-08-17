@@ -8,6 +8,8 @@
     <string>AskDroid</string>
     <key>CFBundleExecutable</key>
     <string>AskDroid</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>dev.askdroid.app</string>
     <key>CFBundleInfoDictionaryVersion</key>
