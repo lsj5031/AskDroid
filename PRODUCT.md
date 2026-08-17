@@ -50,7 +50,8 @@ Out of scope for v1: multi-turn chat, menu bar item, HTML session traces, intera
 
 - Name: **AskDroid**.
 - Voice: direct, short, operational. No hype.
-- Visual world is not pinned beyond "native macOS notch HUD" and "operate, don't decorate."
+- Mark: dark notch HUD + one amber Ask capsule (`docs/icon.png`). No wordmark, no Factory lockup.
+- Visual world is the native macOS notch HUD: charcoal, one amber accent, "operate, don't decorate."
 
 ## Evidence on Hand
 

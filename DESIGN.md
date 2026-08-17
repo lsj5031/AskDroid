@@ -6,6 +6,8 @@
 
 AskDroid is a notch-hugging macOS accessory. The visual world is a dark instrument panel that appears only when summoned: charcoal fill, one amber accent, SF Pro, hairline separators. It is an Operate surface. The HUD is the product.
 
+The app icon is that surface as a mark: a charcoal island hanging from a camera-notch bite, two ink prompt lines, one amber Ask capsule. No wordmark. Master art is `packaging/AppIcon-source.jpg`; `swift scripts/make-icon.swift` packs the `.icns`.
+
 ## Palette
 
 - Panel: `#121213` at ~96% opacity

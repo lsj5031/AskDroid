@@ -30,6 +30,10 @@ proportional to the surface.
   ```bash
   ./scripts/render-screenshots.sh
   ```
+- **Icon**: source is `packaging/AppIcon-source.jpg`. After replacing it:
+  ```bash
+  swift scripts/make-icon.swift
+  ```
 - **API surface**: `AskDroidKit` is a library; exported types should stay
   minimal. New AppKit/SwiftUI interactions must respect Reduce Motion and
   VoiceOver labels the way the existing HUD does.

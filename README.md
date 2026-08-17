@@ -1,5 +1,7 @@
 # AskDroid
 
+<img src="docs/icon.png" width="96" alt="AskDroid icon: a dark notch HUD with one amber Ask button">
+
 Press a hotkey on your Mac. A HUD grows out of the camera housing. Ask Droid, paste images, watch the answer stream, keep a Markdown file.
 
 > **Not an official Factory product.** AskDroid is an independent, open-source client for your own local `droid` CLI. It is not created by or affiliated with [Factory](https://factory.ai), and Factory does not endorse or support it.
