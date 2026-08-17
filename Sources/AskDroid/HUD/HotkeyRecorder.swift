@@ -11,13 +11,9 @@ struct HotkeyRecorder: View {
             listening.toggle()
         } label: {
             Text(listening ? "Press a shortcut…" : HotkeyCodec.display(keyCode: keyCode, modifiers: modifiers))
-                .padding(8)
+                .padding(Theme.settingsControlPadding)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Theme.well, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .stroke(listening ? Theme.accent : Color.clear, lineWidth: 1)
-                }
+                .settingsControlStyle(isActive: listening)
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Hotkey")

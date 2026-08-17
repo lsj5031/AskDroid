@@ -15,10 +15,7 @@ struct SettingsPane: View {
                 .font(.system(size: 11))
                 .foregroundStyle(Theme.mute)
             labeled("Model override") {
-                TextField("Leave blank for Droid default", text: $session.settings.modelOverride)
-                    .textFieldStyle(.plain)
-                    .padding(8)
-                    .background(Theme.well, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                SettingsTextField(placeholder: "Leave blank for Droid default", text: $session.settings.modelOverride)
             }
             HStack(spacing: 12) {
                 labeled("Reasoning") {
@@ -29,6 +26,8 @@ struct SettingsPane: View {
                     }
                     .labelsHidden()
                     .pickerStyle(.menu)
+                    .padding(Theme.settingsControlPadding)
+                    .settingsControlStyle()
                 }
                 labeled("Autonomy") {
                     Picker("", selection: $session.settings.autonomy) {
@@ -38,37 +37,31 @@ struct SettingsPane: View {
                     }
                     .labelsHidden()
                     .pickerStyle(.menu)
+                    .padding(Theme.settingsControlPadding)
+                    .settingsControlStyle()
                 }
             }
             Text("Default is High: Droid can edit files, run commands, and push inside the working directory. Choose Read-only to disable tools.")
                 .font(.system(size: 11))
                 .foregroundStyle(Theme.mute)
             labeled("Working directory") {
-                TextField(AppSettings.defaultWorkingDirectory, text: $session.settings.workingDirectory)
-                    .textFieldStyle(.plain)
-                    .padding(8)
-                    .background(Theme.well, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                SettingsTextField(placeholder: AppSettings.defaultWorkingDirectory, text: $session.settings.workingDirectory)
             }
             Text("Droid starts in a sandbox, not your home folder. Change this only if a question needs another directory.")
                 .font(.system(size: 11))
                 .foregroundStyle(Theme.mute)
             labeled("Answers folder") {
-                TextField(AppSettings.defaultAnswersDirectory, text: $session.settings.answersDirectory)
-                    .textFieldStyle(.plain)
-                    .padding(8)
-                    .background(Theme.well, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                SettingsTextField(placeholder: AppSettings.defaultAnswersDirectory, text: $session.settings.answersDirectory)
             }
             Text("Answers are saved under Application Support, not your home folder.")
                 .font(.system(size: 11))
                 .foregroundStyle(Theme.mute)
             labeled("Droid binary") {
-                TextField("Discover automatically", text: $session.settings.droidPath)
-                    .textFieldStyle(.plain)
-                    .padding(8)
-                    .background(Theme.well, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                SettingsTextField(placeholder: "Discover automatically", text: $session.settings.droidPath)
             }
             Toggle("Launch at login", isOn: $session.settings.launchAtLogin)
                 .toggleStyle(.switch)
+                .settingsControlStyle(showsWell: false)
                 .tint(Theme.accent)
             Link("Droid documentation", destination: URL(string: "https://docs.factory.ai/droid-exec/overview")!)
                 .font(.system(size: 11, weight: .medium))
@@ -95,5 +88,22 @@ struct SettingsPane: View {
                 .foregroundStyle(Theme.mute)
             content()
         }
+    }
+}
+
+/// Settings text field styled like the composer: a well fill with a hairline
+/// border that brightens on focus, instead of the system focus ring.
+private struct SettingsTextField: View {
+    let placeholder: String
+    @Binding var text: String
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        TextField(placeholder, text: $text)
+            .textFieldStyle(.plain)
+            .focusEffectDisabled()
+            .focused($focused)
+            .padding(Theme.settingsControlPadding)
+            .settingsControlStyle(isActive: focused)
     }
 }

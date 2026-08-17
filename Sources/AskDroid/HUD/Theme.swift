@@ -23,6 +23,10 @@ enum Theme {
     static let panelCorner: CGFloat = 18
     static let pillCorner: CGFloat = 17
 
+    /// Corner radius and vertical padding for the settings controls' wells.
+    static let settingsControlCorner: CGFloat = 8
+    static let settingsControlPadding: CGFloat = 8
+
     static let settingsContentHeight: CGFloat = 720
     static let composerContentHeight: CGFloat = 188
     static let imageStripHeight: CGFloat = 72

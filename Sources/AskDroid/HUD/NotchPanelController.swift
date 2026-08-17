@@ -57,6 +57,7 @@ final class NotchPanelController {
             defer: false
         )
         panel.level = .statusBar
+        panel.appearance = NSAppearance(named: .darkAqua)
         panel.hidesOnDeactivate = false
         panel.isOpaque = false
         panel.backgroundColor = .clear
