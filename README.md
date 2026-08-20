@@ -2,9 +2,9 @@
 
 <img src="docs/icon.png" width="96" alt="AskDroid icon: a dark notch HUD with one amber Ask button">
 
-Press a hotkey on your Mac. A HUD grows out of the camera housing. Ask Droid, paste images, watch the answer stream, keep a Markdown file.
+Press a hotkey on your Mac. A HUD grows out of the camera housing. Ask Pi or Droid, paste images, watch the answer stream, keep a Markdown file.
 
-> **Not an official Factory product.** AskDroid is an independent, open-source client for your own local `droid` CLI. It is not created by or affiliated with [Factory](https://factory.ai), and Factory does not endorse or support it.
+> **Independent Open-Source Client.** AskDroid is an independent desktop assistant for your local `pi` or `droid` CLI. It is not created by or affiliated with [Pi](https://pi.dev) or [Factory](https://factory.ai).
 
 On a notched MacBook the surface uses the real notch size and a Dynamic Island silhouette. External displays and older Macs get a floating capsule instead.
 
@@ -18,12 +18,14 @@ On a notched MacBook the surface uses the real notch size and a Dynamic Island s
 ⌃⌘D  →  type or paste  →  ⌘Return  →  ~/Library/Application Support/AskDroid/answers/
 ```
 
-AskDroid is a native Swift/SwiftUI agent app. It does not replace Droid. It talks to the `droid` CLI you already have, using your default `~/.factory/settings.json`.
+AskDroid is a native Swift/SwiftUI agent app. It speaks JSON-over-stdio directly to the CLI you already have installed on your Mac:
+- **Pi** (`pi --mode rpc --no-session`) — *Default*
+- **Droid** (`droid exec --input-format stream-jsonrpc --output-format stream-jsonrpc`)
 
 ## What you need
 
 - macOS 14 or later
-- [Droid CLI](https://docs.factory.ai/droid-exec/overview) so `droid` works in Terminal
+- [Pi CLI](https://pi.dev/docs/latest) (default) or [Droid CLI](https://docs.factory.ai/droid-exec/overview)
 - Xcode / Swift 6 to build from source
 
 ## Install
@@ -40,7 +42,7 @@ To start it at login, open the HUD, click the gear, enable **Launch at login**.
 
 ### Local Network permission
 
-AskDroid talks to the `droid` CLI, which may in turn reach a model server on your local network (for example, a local MLX server). The first time that happens, macOS asks for **Local Network** permission:
+AskDroid talks to your agent CLI, which may in turn reach a model server on your local network (for example, Ollama or a local MLX server). The first time that happens, macOS asks for **Local Network** permission:
 
 1. Launch AskDroid and ask a question.
 2. If macOS prompts *"AskDroid would like to find and connect to devices on your local network"*, click **Allow**.
@@ -61,7 +63,7 @@ open dist/AskDroid.app
 
 1. Press **⌃⌘D** from any app.
 2. Type a question. Paste or drop images. **⌘Return** asks, **Esc** hides.
-3. While Droid works, the HUD streams the answer. Hide it and a compact pill stays beside the notch. Click the pill or press the hotkey to open it again.
+3. While the agent works, the HUD streams the answer. Hide it and a compact pill stays beside the notch. Click the pill or press the hotkey to open it again.
 4. Copy the answer (**⌘C** copies the whole answer when it's ready), or open the archived Markdown file.
 
 The HUD sets `NSWindow.sharingType = .none` and hides the compact pill during system screenshots (⌘⇧3 / 4 / 5) and Screenshot.app. A hotkey present still shows the panel. ScreenCaptureKit recorders on macOS 15+ can still see it.
@@ -85,8 +87,8 @@ Press **Esc** mid-run and the HUD collapses to a pill that keeps the status unde
 Files land in **Application Support/AskDroid/answers**:
 
 ```
-droid-2026-08-15_20-32-00.md
-droid-2026-08-15_20-32-00-1.png
+pi-2026-08-20_22-30-00.md
+pi-2026-08-20_22-30-00-1.png
 ```
 
 If two questions finish in the same second, the next file gets a `-2` suffix.
@@ -95,19 +97,18 @@ If two questions finish in the same second, the next file gets a `-2` suffix.
 
 <img src="docs/screenshots/settings.png" width="560" alt="AskDroid settings hanging from the notch, with hotkey, model, reasoning, autonomy, directories, and launch at login">
 
-All optional. Blank means “use Droid’s own defaults.”
+All optional. Blank means “use the engine’s defaults.”
 
-- Model override
-- Reasoning effort
-- Autonomy (`off` / `low` / `medium` / `high`)
-- Working directory (default `~/Library/Application Support/AskDroid/workspace`)
-- Answers folder (default `~/Library/Application Support/AskDroid/answers`)
-- Path to the `droid` binary
-- Launch at login
+- **Engine:** Switch between **Pi** (default) and **Droid**
+- **Model override:** Model name or provider pattern
+- **Reasoning effort:** `Default`, `Off`, `Minimal`, `Low`, `Medium`, `High`, `X-High`, `Max`
+- **Autonomy:** Droid only (`Read-only`, `Low`, `Medium`, `High`)
+- **Working directory:** (default `~/Library/Application Support/AskDroid/workspace`)
+- **Answers folder:** (default `~/Library/Application Support/AskDroid/answers`)
+- **Engine binary:** Custom path override or auto-discovery (searches `PATH`, `~/.local/bin`, mise shims, npm global, and Homebrew)
+- **Launch at login**
 
-AskDroid looks for `droid` on `PATH`, then in `~/.local/bin`, mise shims, and Homebrew.
-
-Default autonomy is **high**: Droid can edit files, run commands, and push, scoped to the working directory (which defaults to a sandboxed workspace under Application Support). Choose Read-only in Settings to disable tools. Any permission prompt that still appears is auto-declined.
+For Droid, default autonomy is **high**: Droid can edit files, run commands, and push, scoped to the sandboxed working directory. Choose Read-only in Settings to disable tools.
 
 ## Tests
 
@@ -125,8 +126,12 @@ That runs the `AskDroidScreenshots` tool (not the accessory) and writes transpar
 
 ## Why not Shortcuts?
 
-Shortcuts cannot paste images into the agent, cannot stream progress, and start with a tiny `PATH`. AskDroid is a real process that speaks Droid’s JSON-RPC protocol:
+Shortcuts cannot paste images into the agent, cannot stream progress, and start with a tiny `PATH`. AskDroid is a real process that speaks native headless RPC protocols:
 
-```
+```bash
+# Pi
+pi --mode rpc --no-session
+
+# Droid
 droid exec --input-format stream-jsonrpc --output-format stream-jsonrpc
 ```
