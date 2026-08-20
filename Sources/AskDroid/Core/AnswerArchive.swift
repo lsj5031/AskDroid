@@ -9,6 +9,7 @@ enum AnswerArchive {
     static func uniqueBaseName(
         date: Date,
         existingNames: [String],
+        prefix: String = "droid",
         calendar: Calendar = .current
     ) -> String {
         let formatter = DateFormatter()
@@ -17,7 +18,7 @@ enum AnswerArchive {
         formatter.calendar = calendar
         formatter.timeZone = calendar.timeZone
         let stamp = formatter.string(from: date)
-        let root = "droid-\(stamp)"
+        let root = "\(prefix)-\(stamp)"
         if !existingNames.contains(where: { $0.hasPrefix(root) }) {
             return root
         }
@@ -34,6 +35,7 @@ enum AnswerArchive {
         answer: String,
         model: String?,
         duration: TimeInterval,
+        engine: String? = nil,
         imageNames: [String]
     ) -> String {
         var lines: [String] = [
@@ -41,6 +43,9 @@ enum AnswerArchive {
             "",
             "- Asked: \(ISO8601DateFormatter().string(from: date))",
         ]
+        if let engine, !engine.isEmpty {
+            lines.append("- Engine: \(engine.capitalized)")
+        }
         if let model, !model.isEmpty {
             lines.append("- Model: \(model)")
         }
@@ -72,12 +77,14 @@ enum AnswerArchive {
         answer: String,
         model: String?,
         duration: TimeInterval,
+        engine: String? = nil,
         images: [AttachedImage],
         fileManager: FileManager = .default
     ) throws -> ArchivedAnswer {
         try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         let existing = (try? fileManager.contentsOfDirectory(atPath: directory.path)) ?? []
-        let base = uniqueBaseName(date: date, existingNames: existing)
+        let prefix = engine?.lowercased() ?? "droid"
+        let base = uniqueBaseName(date: date, existingNames: existing, prefix: prefix)
         var imageURLs: [URL] = []
         var imageNames: [String] = []
 
@@ -96,6 +103,7 @@ enum AnswerArchive {
             answer: answer,
             model: model,
             duration: duration,
+            engine: engine,
             imageNames: imageNames
         )
         try Data(body.utf8).write(to: markdownURL, options: .atomic)

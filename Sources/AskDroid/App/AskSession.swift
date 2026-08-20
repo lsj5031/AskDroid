@@ -35,16 +35,49 @@ final class AskSession: ObservableObject {
     static let maxImageBytes = 5 * 1024 * 1024
     static let maxTotalImageBytes = 15 * 1024 * 1024
 
-    let engine: DroidEngine
+    let droidEngine: DroidEngine
+    let piEngine: PiEngine
+
+    var engine: any EngineClient {
+        switch settings.engine {
+        case .droid: droidEngine
+        case .pi: piEngine
+        }
+    }
+
     private var runTask: Task<Void, Never>?
     private var ticker: Task<Void, Never>?
     private var copiedResetTask: Task<Void, Never>?
     private var runStartedAt: Date?
     private(set) var currentRunID: UUID?
 
-    init(settings: AppSettings = SettingsStore.load(), engine: DroidEngine = DroidEngine()) {
+    init(
+        settings: AppSettings = SettingsStore.load(),
+        droidEngine: DroidEngine = DroidEngine(),
+        piEngine: PiEngine = PiEngine()
+    ) {
         self.settings = settings
-        self.engine = engine
+        self.droidEngine = droidEngine
+        self.piEngine = piEngine
+    }
+
+    /// Convenience for callers that inject a single known engine. The injected
+    /// engine is authoritative: `settings.engine` is updated to match it, so the
+    /// session always uses the instance the caller supplied. Unknown
+    /// `EngineClient` implementations fall back to the default engines; prefer
+    /// the designated initializer in that case.
+    convenience init(settings: AppSettings = SettingsStore.load(), engine: any EngineClient) {
+        if let droid = engine as? DroidEngine {
+            var settings = settings
+            settings.engine = .droid
+            self.init(settings: settings, droidEngine: droid, piEngine: PiEngine())
+        } else if let pi = engine as? PiEngine {
+            var settings = settings
+            settings.engine = .pi
+            self.init(settings: settings, droidEngine: DroidEngine(), piEngine: pi)
+        } else {
+            self.init(settings: settings)
+        }
     }
 
     var canSubmit: Bool {
@@ -56,7 +89,7 @@ final class AskSession: ObservableObject {
     var compactTitle: String {
         switch phase {
         case .running:
-            activity.isEmpty ? "Asking Droid…" : activity
+            activity.isEmpty ? "Asking \(settings.engine.title)…" : activity
         case .completed:
             "Done"
         case .failed:
@@ -103,7 +136,7 @@ final class AskSession: ObservableObject {
     func submit() {
         guard canSubmit, phase != .running else { return }
         let runID = UUID()
-        let request = DroidRunRequest(
+        let request = EngineRequest(
             prompt: prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 ? "Look at the attached image(s)."
                 : prompt,
@@ -121,15 +154,16 @@ final class AskSession: ObservableObject {
         copied = false
         notice = nil
         phase = .running
-        activity = "Starting Droid…"
+        activity = "Starting \(settings.engine.title)…"
         runStartedAt = Date()
         elapsed = 0
         currentRunID = runID
         startTicker()
 
+        let client = self.engine
         runTask?.cancel()
-        runTask = Task { [engine] in
-            await engine.run(request, runID: runID) { [weak self] event in
+        runTask = Task { [client] in
+            await client.run(request, runID: runID) { [weak self] event in
                 Task { @MainActor in
                     self?.handle(event)
                 }
@@ -138,15 +172,16 @@ final class AskSession: ObservableObject {
     }
 
     func cancelRun() {
+        let client = self.engine
         let runID = currentRunID
         runTask?.cancel()
         if let runID {
-            Task { await engine.cancel(runID: runID) }
+            Task { await client.cancel(runID: runID) }
         }
         currentRunID = nil
         ticker?.cancel()
         phase = .failed
-        errorMessage = DroidEngineError.cancelled.localizedDescription
+        errorMessage = EngineError.cancelled.localizedDescription
         activity = "Cancelled"
         AskLog.line("run \(runID?.uuidString.prefix(8) ?? "none") cancelled by user")
     }
@@ -243,7 +278,7 @@ final class AskSession: ObservableObject {
         NSApp.terminate(nil)
     }
 
-    func handle(_ event: DroidRunEvent) {
+    func handle(_ event: EngineEvent) {
         switch event {
         case .started(let runID):
             guard runID == currentRunID else { return }
@@ -277,7 +312,7 @@ final class AskSession: ObservableObject {
             tokenSummary = result.tokenUsage?.summary
             durationText = AnswerArchive.formatDuration(result.duration)
             if answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                activity = "Droid ended the turn with no answer"
+                activity = "\(settings.engine.title) ended the turn with no answer"
                 errorMessage = emptyAnswerMessage()
                 phase = .failed
                 AskLog.line("run \(runID.uuidString.prefix(8)) completed with empty answer")
@@ -301,13 +336,14 @@ final class AskSession: ObservableObject {
 
     private func emptyAnswerMessage() -> String {
         let log = runLog.joined(separator: "\n").lowercased()
+        let title = settings.engine.title
         if log.contains("connection error") {
-            return "Droid hit a connection error and couldn't reach the model. If you use a local or network model, make sure AskDroid has Local Network permission in System Settings → Privacy & Security → Local Network, then try again."
+            return "\(title) hit a connection error and couldn't reach the model. If you use a local or network model, make sure AskDroid has Local Network permission in System Settings → Privacy & Security → Local Network, then try again."
         }
-        if settings.autonomy == .off {
+        if settings.engine == .droid, settings.autonomy == .off {
             return "Droid produced no text. In read-only mode every tool call is auto-rejected, so Droid may have had nothing to say. Try rephrasing, or raise autonomy in Settings."
         }
-        return "Droid ended the turn without writing an answer. Open Activity to see what happened, then try again."
+        return "\(title) ended the turn without writing an answer. Open Activity to see what happened, then try again."
     }
 
     private func appendLog(_ text: String) {

@@ -259,6 +259,27 @@ final class ArchiveTests: XCTestCase {
         XCTAssertTrue(body.contains("![](droid-x-1.png)"))
         XCTAssertTrue(body.contains("claude-opus-5"))
     }
+
+    func testMarkdownIncludesEngine() {
+        let body = AnswerArchive.markdown(
+            question: "What is this?",
+            answer: "A square.",
+            model: "claude-opus-5",
+            duration: 3.2,
+            engine: "pi",
+            imageNames: []
+        )
+        XCTAssertTrue(body.contains("- Engine: Pi"))
+        XCTAssertTrue(body.contains("- Model: claude-opus-5"))
+    }
+
+    func testUniqueNameWithPiPrefix() {
+        let date = Date(timeIntervalSince1970: 1_787_000_000)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let name = AnswerArchive.uniqueBaseName(date: date, existingNames: [], prefix: "pi", calendar: calendar)
+        XCTAssertTrue(name.hasPrefix("pi-"))
+    }
 }
 
 final class BinaryDiscoveryTests: XCTestCase {
@@ -279,6 +300,24 @@ final class BinaryDiscoveryTests: XCTestCase {
             fileExists: { $0 == "/opt/bin/droid" }
         )
         XCTAssertEqual(resolved, "/opt/bin/droid")
+    }
+
+    func testPiDiscoveryOverrideAndFallbacks() {
+        let resolvedOverride = BinaryDiscovery.resolve(
+            binaryName: "pi",
+            override: "/opt/custom/pi",
+            fallbackCandidates: BinaryDiscovery.piFallbackCandidates,
+            fileExists: { $0 == "/opt/custom/pi" }
+        )
+        XCTAssertEqual(resolvedOverride, "/opt/custom/pi")
+
+        let resolvedFallback = BinaryDiscovery.resolve(
+            binaryName: "pi",
+            override: "",
+            fallbackCandidates: ["/home/.local/bin/pi"],
+            fileExists: { $0 == "/home/.local/bin/pi" }
+        )
+        XCTAssertEqual(resolvedFallback, "/home/.local/bin/pi")
     }
 }
 
@@ -620,8 +659,8 @@ private func waitForProcesses(_ launcher: MockLauncher, count: Int) async {
 }
 
 private func runEngine(
-    _ engine: DroidEngine,
-    request: DroidRunRequest,
+    _ engine: any EngineClient,
+    request: EngineRequest,
     runID: UUID = UUID(),
     box: EventBox
 ) async {
@@ -951,16 +990,37 @@ final class AskSessionTests: XCTestCase {
         super.tearDown()
     }
 
-    private func makeSession(launcher: MockLauncher) -> AskSession {
+    private func makeSession(launcher: MockLauncher, engine: Engine = .droid) -> AskSession {
         var settings = AppSettings.default
+        settings.engine = engine
         settings.droidPath = "/tmp/droid"
+        settings.piPath = "/tmp/pi"
         let temp = FileManager.default.temporaryDirectory
         settings.answersDirectory = temp.appendingPathComponent(UUID().uuidString).path
         settings.workingDirectory = temp.appendingPathComponent(UUID().uuidString).path
         return AskSession(
             settings: settings,
-            engine: DroidEngine(launcher: launcher, fileExists: { _ in true })
+            droidEngine: DroidEngine(launcher: launcher, fileExists: { _ in true }),
+            piEngine: PiEngine(launcher: launcher, fileExists: { _ in true })
         )
+    }
+
+    func testInjectedPiEngineWinsOverSettings() {
+        var settings = AppSettings.default
+        settings.engine = .droid
+        let injected = PiEngine()
+        let session = AskSession(settings: settings, engine: injected)
+        XCTAssertEqual(session.settings.engine, .pi)
+        XCTAssertIdentical(session.engine as? PiEngine, injected)
+    }
+
+    func testInjectedDroidEngineWinsOverSettings() {
+        var settings = AppSettings.default
+        settings.engine = .pi
+        let injected = DroidEngine()
+        let session = AskSession(settings: settings, engine: injected)
+        XCTAssertEqual(session.settings.engine, .droid)
+        XCTAssertIdentical(session.engine as? DroidEngine, injected)
     }
 
     func testStaleEventsDroppedAfterCancel() async {
@@ -1037,5 +1097,330 @@ final class AskSessionTests: XCTestCase {
         session.phase = .failed
         session.errorMessage = "Droid hit a connection error and could not reach the model."
         XCTAssertEqual(session.compactTitle, "Failed")
+    }
+}
+
+final class SettingsStoreTests: XCTestCase {
+    /// Ephemeral suite so `swift test` never reads or writes the app's real
+    /// UserDefaults.
+    private func freshSuite() -> UserDefaults {
+        let name = "AskDroidTests-\(UUID().uuidString)"
+        let suite = UserDefaults(suiteName: name)!
+        suite.removePersistentDomain(forName: name)
+        return suite
+    }
+
+    func testDefaultEngineIsPi() {
+        XCTAssertEqual(AppSettings.default.engine, .pi)
+    }
+
+    func testSettingsStoreRoundTrip() {
+        let suite = freshSuite()
+        var settings = AppSettings.default
+        settings.engine = .droid
+        settings.droidPath = "/custom/droid"
+        settings.piPath = "/custom/pi"
+        settings.reasoning = .xhigh
+        SettingsStore.save(settings, to: suite)
+
+        let loaded = SettingsStore.load(from: suite)
+        XCTAssertEqual(loaded.engine, .droid)
+        XCTAssertEqual(loaded.droidPath, "/custom/droid")
+        XCTAssertEqual(loaded.piPath, "/custom/pi")
+        XCTAssertEqual(loaded.reasoning, .xhigh)
+    }
+
+    func testLoadWithoutSavedEngineUsesDefault() {
+        let suite = freshSuite()
+        let loaded = SettingsStore.load(from: suite)
+        XCTAssertEqual(loaded.engine, .pi)
+    }
+
+    func testReasoningSupersetMapping() {
+        XCTAssertEqual(ReasoningSetting.off.piProtocolValue, "off")
+        XCTAssertNil(ReasoningSetting.off.droidProtocolValue)
+
+        XCTAssertEqual(ReasoningSetting.minimal.piProtocolValue, "minimal")
+        XCTAssertNil(ReasoningSetting.minimal.droidProtocolValue)
+
+        XCTAssertEqual(ReasoningSetting.low.piProtocolValue, "low")
+        XCTAssertEqual(ReasoningSetting.low.droidProtocolValue, "low")
+
+        XCTAssertEqual(ReasoningSetting.medium.piProtocolValue, "medium")
+        XCTAssertEqual(ReasoningSetting.medium.droidProtocolValue, "medium")
+
+        XCTAssertEqual(ReasoningSetting.high.piProtocolValue, "high")
+        XCTAssertEqual(ReasoningSetting.high.droidProtocolValue, "high")
+
+        XCTAssertEqual(ReasoningSetting.xhigh.piProtocolValue, "xhigh")
+        XCTAssertNil(ReasoningSetting.xhigh.droidProtocolValue)
+
+        XCTAssertEqual(ReasoningSetting.max.piProtocolValue, "max")
+        XCTAssertNil(ReasoningSetting.max.droidProtocolValue)
+
+        XCTAssertNil(ReasoningSetting.defaultLevel.piProtocolValue)
+        XCTAssertNil(ReasoningSetting.defaultLevel.droidProtocolValue)
+    }
+}
+
+final class PiEngineStateMachineTests: XCTestCase {
+    private static func makeSettings() -> AppSettings {
+        var s = AppSettings.default
+        s.engine = .pi
+        s.piPath = "/tmp/pi"
+        return s
+    }
+
+    func testPromptParamsFormat() {
+        let image = AttachedImage(
+            id: UUID(),
+            data: Data([0x89, 0x50, 0x4E, 0x47]),
+            mediaType: "image/png",
+            filename: "paste.png"
+        )
+        let request = EngineRequest(
+            prompt: "what is in this?",
+            images: [image],
+            settings: Self.makeSettings()
+        )
+        let params = PiEngine.promptParams(from: request)
+        XCTAssertEqual(params["id"] as? String, "1")
+        XCTAssertEqual(params["type"] as? String, "prompt")
+        XCTAssertEqual(params["message"] as? String, "what is in this?")
+        let images = params["images"] as? [[String: Any]]
+        XCTAssertEqual(images?.count, 1)
+        XCTAssertEqual(images?.first?["type"] as? String, "image")
+        XCTAssertEqual(images?.first?["mimeType"] as? String, "image/png")
+        XCTAssertNotNil(images?.first?["data"] as? String)
+    }
+
+    func testPiHappyPathStreamingAndSettled() async {
+        let launcher = MockLauncher()
+        let engine = PiEngine(launcher: launcher, fileExists: { _ in true })
+        let box = EventBox()
+        let answers = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        var settings = Self.makeSettings()
+        settings.answersDirectory = answers.path
+
+        let driver = Task.detached {
+            await waitForProcesses(launcher, count: 1)
+            let process = launcher.processes[0]
+            process.feedStdout(#"{"id":"1","type":"response","command":"prompt","success":true}"#)
+            process.feedStdout(#"{"type":"agent_start"}"#)
+            process.feedStdout(#"{"type":"message_start","message":{"role":"assistant","model":"claude-3-5-sonnet-20241022","provider":"anthropic"}}"#)
+            try? await Task.sleep(for: .milliseconds(50))
+            process.feedStdout(#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Hello "}}"#)
+            process.feedStdout(#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"from Pi!"}}"#)
+            process.feedStdout(#"{"type":"message_update","usage":{"input":12,"output":8}}"#)
+            process.feedStdout(#"{"type":"agent_settled"}"#)
+            process.closeStdout()
+            process.closeStderr()
+            process.setExit(0)
+        }
+
+        await runEngine(engine, request: EngineRequest(prompt: "hi", images: [], settings: settings), box: box)
+        await driver.value
+
+        let textDeltas = box.snapshot().compactMap { event -> String? in
+            if case .textDelta(_, let text) = event { return text }
+            return nil
+        }
+        XCTAssertEqual(textDeltas.joined(), "Hello from Pi!")
+
+        let result = box.snapshot().compactMap { event -> EngineResult? in
+            if case .completed(_, let r) = event { return r }
+            return nil
+        }.last
+        XCTAssertEqual(result?.text, "Hello from Pi!")
+        XCTAssertEqual(result?.model, "claude-3-5-sonnet-20241022")
+        XCTAssertEqual(result?.tokenUsage?.inputTokens, 12)
+        XCTAssertEqual(result?.tokenUsage?.outputTokens, 8)
+        XCTAssertNotNil(result?.archiveURL)
+        try? FileManager.default.removeItem(at: answers)
+    }
+
+    func testPiThinkingDeltasEmitted() async {
+        let launcher = MockLauncher()
+        let engine = PiEngine(launcher: launcher, fileExists: { _ in true })
+        let box = EventBox()
+
+        let driver = Task.detached {
+            await waitForProcesses(launcher, count: 1)
+            let process = launcher.processes[0]
+            process.feedStdout(#"{"id":"1","type":"response","command":"prompt","success":true}"#)
+            process.feedStdout(#"{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"thinking hard..."}}"#)
+            process.feedStdout(#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"answer"}}"#)
+            process.feedStdout(#"{"type":"agent_settled"}"#)
+            process.closeStdout()
+            process.closeStderr()
+            process.setExit(0)
+        }
+
+        await runEngine(engine, request: EngineRequest(prompt: "hi", images: [], settings: Self.makeSettings()), box: box)
+        await driver.value
+
+        let thinking = box.snapshot().compactMap { event -> String? in
+            if case .thinking(_, let t) = event { return t }
+            return nil
+        }
+        XCTAssertEqual(thinking.joined(), "thinking hard...")
+    }
+
+    func testPiToolExecutionActivity() async {
+        let launcher = MockLauncher()
+        let engine = PiEngine(launcher: launcher, fileExists: { _ in true })
+        let box = EventBox()
+
+        let driver = Task.detached {
+            await waitForProcesses(launcher, count: 1)
+            let process = launcher.processes[0]
+            process.feedStdout(#"{"id":"1","type":"response","command":"prompt","success":true}"#)
+            process.feedStdout(#"{"type":"tool_execution_start","toolName":"read","args":{"path":"foo.swift"}}"#)
+            process.feedStdout(#"{"type":"tool_execution_end","toolName":"read","result":{},"isError":false}"#)
+            process.feedStdout(#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"done"}}"#)
+            process.feedStdout(#"{"type":"agent_settled"}"#)
+            process.closeStdout()
+            process.closeStderr()
+            process.setExit(0)
+        }
+
+        await runEngine(engine, request: EngineRequest(prompt: "hi", images: [], settings: Self.makeSettings()), box: box)
+        await driver.value
+
+        let activities = box.snapshot().compactMap { event -> String? in
+            if case .activity(_, let a) = event { return a }
+            return nil
+        }
+        XCTAssertTrue(activities.contains("Reading files…"))
+    }
+
+    func testPiPromptRejectedEmitsFailure() async {
+        let launcher = MockLauncher()
+        let engine = PiEngine(launcher: launcher, fileExists: { _ in true })
+        let box = EventBox()
+
+        let driver = Task.detached {
+            await waitForProcesses(launcher, count: 1)
+            let process = launcher.processes[0]
+            process.feedStdout(#"{"id":"1","type":"response","command":"prompt","success":false,"error":"Invalid model name"}"#)
+            process.closeStdout()
+            process.closeStderr()
+            process.setExit(1)
+        }
+
+        await runEngine(engine, request: EngineRequest(prompt: "hi", images: [], settings: Self.makeSettings()), box: box)
+        await driver.value
+
+        let failure = box.snapshot().compactMap { event -> String? in
+            if case .failed(_, let m) = event { return m }
+            return nil
+        }.last
+        XCTAssertEqual(failure, "Invalid model name")
+    }
+
+    func testPiExtensionErrorEmitsFailure() async {
+        let launcher = MockLauncher()
+        let engine = PiEngine(launcher: launcher, fileExists: { _ in true })
+        let box = EventBox()
+
+        let driver = Task.detached {
+            await waitForProcesses(launcher, count: 1)
+            let process = launcher.processes[0]
+            process.feedStdout(#"{"id":"1","type":"response","command":"prompt","success":true}"#)
+            process.feedStdout(#"{"type":"extension_error","error":"Hook error in session"}"#)
+            process.closeStdout()
+            process.closeStderr()
+            process.setExit(1)
+        }
+
+        await runEngine(engine, request: EngineRequest(prompt: "hi", images: [], settings: Self.makeSettings()), box: box)
+        await driver.value
+
+        let failure = box.snapshot().compactMap { event -> String? in
+            if case .failed(_, let m) = event { return m }
+            return nil
+        }.last
+        XCTAssertEqual(failure, "Hook error in session")
+    }
+
+    func testPiAutoRetryEndFailureEmitsError() async {
+        let launcher = MockLauncher()
+        let engine = PiEngine(launcher: launcher, fileExists: { _ in true })
+        let box = EventBox()
+
+        let driver = Task.detached {
+            await waitForProcesses(launcher, count: 1)
+            let process = launcher.processes[0]
+            process.feedStdout(#"{"id":"1","type":"response","command":"prompt","success":true}"#)
+            process.feedStdout(#"{"type":"auto_retry_start","attempt":1,"maxAttempts":3,"errorMessage":"503 overloaded"}"#)
+            process.feedStdout(#"{"type":"auto_retry_end","success":false,"finalError":"503 overloaded"}"#)
+            process.feedStdout(#"{"type":"agent_settled"}"#)
+            process.closeStdout()
+            process.closeStderr()
+            process.setExit(1)
+        }
+
+        await runEngine(engine, request: EngineRequest(prompt: "hi", images: [], settings: Self.makeSettings()), box: box)
+        await driver.value
+
+        let failure = box.snapshot().compactMap { event -> String? in
+            if case .failed(_, let m) = event { return m }
+            return nil
+        }.last
+        XCTAssertEqual(failure, "503 overloaded")
+    }
+
+    func testPiCancelMidRunSendsAbort() async {
+        let launcher = MockLauncher()
+        let engine = PiEngine(launcher: launcher, fileExists: { _ in true })
+        let box = EventBox()
+        let runID = UUID()
+
+        let driver = Task.detached {
+            await waitForProcesses(launcher, count: 1)
+            await engine.cancel(runID: runID)
+        }
+
+        await runEngine(
+            engine,
+            request: EngineRequest(prompt: "hi", images: [], settings: Self.makeSettings()),
+            runID: runID,
+            box: box
+        )
+        await driver.value
+
+        XCTAssertEqual(launcher.processes.count, 1)
+        XCTAssertTrue(launcher.processes[0].terminated)
+        let written = launcher.processes[0].written.joined()
+        XCTAssertTrue(written.contains(#""type":"abort"#))
+        let failure = box.snapshot().compactMap { event -> String? in
+            if case .failed(_, let m) = event { return m }
+            return nil
+        }.last
+        XCTAssertEqual(failure, EngineError.cancelled.localizedDescription)
+    }
+
+    func testPiAuthErrorOnStderr() async {
+        let launcher = MockLauncher()
+        let engine = PiEngine(launcher: launcher, fileExists: { _ in true })
+        let box = EventBox()
+
+        let driver = Task.detached {
+            await waitForProcesses(launcher, count: 1)
+            let process = launcher.processes[0]
+            process.feedStderr("503: auth_unavailable: no auth available")
+            process.closeStdout()
+            process.closeStderr()
+            process.setExit(1)
+        }
+
+        await runEngine(engine, request: EngineRequest(prompt: "hi", images: [], settings: Self.makeSettings()), box: box)
+        await driver.value
+
+        let failure = box.snapshot().compactMap { event -> String? in
+            if case .failed(_, let m) = event { return m }
+            return nil
+        }.last
+        XCTAssertEqual(failure, EngineError.notAuthenticated(Engine.pi).localizedDescription)
     }
 }

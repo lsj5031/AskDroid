@@ -1,141 +1,12 @@
 import Foundation
 
-enum DroidEngineError: LocalizedError, Equatable {
-    case droidNotFound
-    case notAuthenticated
-    case protocolFailure(String)
-    case cancelled
-    case failed(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .droidNotFound:
-            "Droid was not found. Install the CLI or set its path in Settings."
-        case .notAuthenticated:
-            "Droid is not authenticated. Run `droid` in Terminal and sign in."
-        case .protocolFailure(let message):
-            message
-        case .cancelled:
-            "Cancelled."
-        case .failed(let message):
-            message
-        }
-    }
-}
-
-struct DroidRunRequest: Sendable {
-    var prompt: String
-    var images: [AttachedImage]
-    var settings: AppSettings
-}
-
-struct DroidRunResult: Sendable {
-    var text: String
-    var model: String?
-    var duration: TimeInterval
-    var tokenUsage: TokenUsage?
-    var archiveURL: URL?
-    var archiveError: String?
-}
-
-enum DroidRunEvent: Sendable {
-    case started(UUID)
-    case activity(UUID, String)
-    case thinking(UUID, String)
-    case textDelta(UUID, String)
-    case log(UUID, String)
-    case completed(UUID, DroidRunResult)
-    case failed(UUID, String)
-}
-
-protocol DroidProcessLaunching: Sendable {
-    func launch(
-        executable: String,
-        arguments: [String],
-        environment: [String: String],
-        cwd: String
-    ) throws -> any DroidProcessIO
-}
-
-protocol DroidProcessIO: AnyObject, Sendable {
-    var standardOutput: FileHandle { get }
-    var standardError: FileHandle { get }
-    func write(_ line: String) throws
-    func terminate()
-    func waitUntilExit() -> Int32
-}
-
-final class FoundationDroidProcess: DroidProcessIO, @unchecked Sendable {
-    let process: Process
-    let stdin: FileHandle
-    let standardOutput: FileHandle
-    let standardError: FileHandle
-
-    init(process: Process, stdin: FileHandle, stdout: FileHandle, stderr: FileHandle) {
-        self.process = process
-        self.stdin = stdin
-        self.standardOutput = stdout
-        self.standardError = stderr
-    }
-
-    func write(_ line: String) throws {
-        var payload = line
-        if !payload.hasSuffix("\n") {
-            payload.append("\n")
-        }
-        guard let data = payload.data(using: .utf8) else { return }
-        try stdin.write(contentsOf: data)
-    }
-
-    func terminate() {
-        if process.isRunning {
-            process.terminate()
-        }
-        try? stdin.close()
-    }
-
-    func waitUntilExit() -> Int32 {
-        process.waitUntilExit()
-        return process.terminationStatus
-    }
-}
-
-struct FoundationProcessLauncher: DroidProcessLaunching {
-    func launch(
-        executable: String,
-        arguments: [String],
-        environment: [String: String],
-        cwd: String
-    ) throws -> any DroidProcessIO {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        process.currentDirectoryURL = URL(fileURLWithPath: cwd)
-        process.environment = environment
-
-        let stdin = Pipe()
-        let stdout = Pipe()
-        let stderr = Pipe()
-        process.standardInput = stdin
-        process.standardOutput = stdout
-        process.standardError = stderr
-        try process.run()
-        return FoundationDroidProcess(
-            process: process,
-            stdin: stdin.fileHandleForWriting,
-            stdout: stdout.fileHandleForReading,
-            stderr: stderr.fileHandleForReading
-        )
-    }
-}
-
-actor DroidEngine {
-    private let launcher: any DroidProcessLaunching
+actor DroidEngine: EngineClient {
+    private let launcher: any ProcessLaunching
     private let fileExists: @Sendable (String) -> Bool
-    private var activeProcess: (runID: UUID, process: any DroidProcessIO)?
+    private var activeProcess: (runID: UUID, process: any ProcessIO)?
 
     init(
-        launcher: any DroidProcessLaunching = FoundationProcessLauncher(),
+        launcher: any ProcessLaunching = FoundationProcessLauncher(),
         fileExists: @escaping @Sendable (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
     ) {
         self.launcher = launcher
@@ -149,17 +20,20 @@ actor DroidEngine {
     }
 
     func run(
-        _ request: DroidRunRequest,
+        _ request: EngineRequest,
         runID: UUID = UUID(),
-        onEvent: @escaping @Sendable (DroidRunEvent) -> Void
+        onEvent: @escaping @Sendable (EngineEvent) -> Void
     ) async {
-        let startedAt = Date()
         onEvent(.started(runID))
         onEvent(.activity(runID, "Starting Droid…"))
         onEvent(.log(runID, "Looking for the droid CLI…"))
 
-        guard let executable = BinaryDiscovery.resolve(override: request.settings.droidPath, fileExists: fileExists) else {
-            onEvent(.failed(runID, DroidEngineError.droidNotFound.localizedDescription))
+        guard let executable = BinaryDiscovery.resolve(
+            engine: .droid,
+            override: request.settings.droidPath,
+            fileExists: fileExists
+        ) else {
+            onEvent(.failed(runID, EngineError.binaryNotFound(Engine.droid).localizedDescription))
             return
         }
         onEvent(.log(runID, "Using \(executable)"))
@@ -193,115 +67,50 @@ actor DroidEngine {
             let process = try launcher.launch(
                 executable: executable,
                 arguments: arguments,
-                environment: Self.augmentedEnvironment(),
+                environment: EngineSupport.augmentedEnvironment(),
                 cwd: cwd
             )
             if let stale = activeProcess {
                 stale.process.terminate()
             }
             activeProcess = (runID, process)
-            onEvent(.activity(runID, "Opening a Droid session…"))
-            onEvent(.log(runID, "cwd \(cwd)"))
 
-            let session = RunSession(
+            let config = EngineProcessRunner.Configuration(
+                engine: .droid,
                 request: request,
-                startedAt: startedAt,
-                model: request.settings.modelOverride.trimmedOrNil
+                runID: runID,
+                initialActivity: "Opening a Droid session…",
+                sendInitialMessage: { process, _ in
+                    try process.write(try JSONRPC.encodeLine(JSONRPC.request(
+                        id: "1",
+                        method: "droid.initialize_session",
+                        params: Self.initializeParams(from: request.settings)
+                    )))
+                    onEvent(.log(runID, "initialize_session sent"))
+                },
+                acceptTimeoutMessage: "Droid did not start a session in time.",
+                turnTimeoutMessage: "Droid did not finish in 10 minutes.",
+                isInitialAccepted: { await $0.didInitialize },
+                isAuthError: { line in
+                    line.localizedCaseInsensitiveContains("not authenticated")
+                        || line.localizedCaseInsensitiveContains("FACTORY_API_KEY")
+                        || line.localizedCaseInsensitiveContains("invalid api key")
+                },
+                handleLine: { [weak self] line, process, session in
+                    await self?.handle(line: line, process: process, session: session, runID: runID, onEvent: onEvent)
+                }
             )
 
-            try process.write(try JSONRPC.encodeLine(JSONRPC.request(
-                id: "1",
-                method: "droid.initialize_session",
-                params: Self.initializeParams(from: request.settings)
-            )))
-            onEvent(.log(runID, "initialize_session sent"))
-
-            let initTimeout = Task {
-                try? await Task.sleep(for: .seconds(25))
-                guard !Task.isCancelled else { return }
-                if await !session.didInitialize, await !session.isFinished {
-                    await session.mark(error: "Droid did not start a session in time.")
-                    process.terminate()
-                }
-            }
-
-            let turnTimeout = Task {
-                try? await Task.sleep(for: .seconds(600))
-                guard !Task.isCancelled else { return }
-                if await !session.isFinished {
-                    await session.mark(error: "Droid did not finish in 10 minutes.")
-                    process.terminate()
-                }
-            }
-
-            // NOTE: read(upToCount:) blocks until the buffer is full or EOF, which
-            // deadlocks on lines larger than the chunk size (the initialize response
-            // is a single ~20 KB line). availableData returns whatever is in the pipe.
-            let stdoutTask = Task.detached {
-                let reader = LineReader()
-                while true {
-                    let data = process.standardOutput.availableData
-                    if data.isEmpty { break }
-                    for line in reader.push(data) {
-                        await self.handle(line: line, process: process, session: session, runID: runID, onEvent: onEvent)
-                        if await session.isFinished { return }
-                    }
-                }
-            }
-
-            let stderrTask = Task.detached {
-                let reader = LineReader()
-                while true {
-                    let data = process.standardError.availableData
-                    if data.isEmpty { break }
-                    for line in reader.push(data) {
-                        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !trimmed.isEmpty else { continue }
-                        onEvent(.log(runID, trimmed))
-                        if trimmed.localizedCaseInsensitiveContains("not authenticated")
-                            || trimmed.localizedCaseInsensitiveContains("FACTORY_API_KEY")
-                        {
-                            await session.mark(error: DroidEngineError.notAuthenticated.localizedDescription)
-                            process.terminate()
-                        }
-                    }
-                }
-            }
-
-            let status = await withCheckedContinuation { continuation in
-                DispatchQueue.global(qos: .userInitiated).async {
-                    continuation.resume(returning: process.waitUntilExit())
-                }
-            }
-            initTimeout.cancel()
-            turnTimeout.cancel()
-            _ = await stdoutTask.result
-            _ = await stderrTask.result
+            await EngineProcessRunner.run(process: process, config: config, onEvent: onEvent)
             if activeProcess?.runID == runID {
                 activeProcess = nil
             }
-
-            if await session.isFinished { return }
-
-            if let lastError = await session.lastError {
-                onEvent(.failed(runID, lastError))
-                return
-            }
-            if Task.isCancelled || status == SIGTERM || status == SIGKILL {
-                onEvent(.failed(runID, DroidEngineError.cancelled.localizedDescription))
-                return
-            }
-            if status != 0 {
-                onEvent(.failed(runID, "Droid exited with status \(status)."))
-                return
-            }
-            await emitCompletion(session: session, runID: runID, onEvent: onEvent)
         } catch is CancellationError {
             if activeProcess?.runID == runID {
                 activeProcess?.process.terminate()
                 activeProcess = nil
             }
-            onEvent(.failed(runID, DroidEngineError.cancelled.localizedDescription))
+            onEvent(.failed(runID, EngineError.cancelled.localizedDescription))
         } catch {
             if activeProcess?.runID == runID {
                 activeProcess = nil
@@ -312,10 +121,10 @@ actor DroidEngine {
 
     private func handle(
         line: String,
-        process: any DroidProcessIO,
+        process: any ProcessIO,
         session: RunSession,
         runID: UUID,
-        onEvent: @escaping @Sendable (DroidRunEvent) -> Void
+        onEvent: @escaping @Sendable (EngineEvent) -> Void
     ) async {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, let message = try? JSONRPC.parse(trimmed) else { return }
@@ -409,7 +218,7 @@ actor DroidEngine {
             process.terminate()
         case .turnCompleted(let durationMs, let usage):
             await session.complete(durationMs: durationMs, tokenUsage: usage)
-            await emitCompletion(session: session, runID: runID, onEvent: onEvent)
+            await EngineSupport.emitCompletion(session: session, runID: runID, engine: Engine.droid, onEvent: onEvent)
             process.terminate()
         case .ignored:
             // Unknown session_notification subtypes are noise; anything else with a
@@ -420,46 +229,7 @@ actor DroidEngine {
         }
     }
 
-    private func emitCompletion(
-        session: RunSession,
-        runID: UUID,
-        onEvent: @escaping @Sendable (DroidRunEvent) -> Void
-    ) async {
-        let snapshot = await session.snapshot()
-        let duration = Date().timeIntervalSince(snapshot.startedAt)
-        if snapshot.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            onEvent(.log(runID, "Turn ended with no text answer."))
-        }
-        var archiveURL: URL?
-        var archiveError: String?
-        if !snapshot.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            do {
-                let archived = try AnswerArchive.write(
-                    directory: URL(fileURLWithPath: snapshot.request.settings.resolvedAnswersDirectory, isDirectory: true),
-                    question: snapshot.request.prompt,
-                    answer: snapshot.answer,
-                    model: snapshot.model,
-                    duration: duration,
-                    images: snapshot.request.images
-                )
-                archiveURL = archived.markdownURL
-                onEvent(.log(runID, "Saved \(archived.markdownURL.lastPathComponent)"))
-            } catch {
-                archiveError = "Could not save the answer file: \(error.localizedDescription)"
-                onEvent(.log(runID, archiveError ?? "Could not save the answer file."))
-            }
-        }
-        onEvent(.completed(runID, DroidRunResult(
-            text: snapshot.answer,
-            model: snapshot.model,
-            duration: duration,
-            tokenUsage: snapshot.tokenUsage,
-            archiveURL: archiveURL,
-            archiveError: archiveError
-        )))
-    }
-
-    private func writeResponse(_ process: any DroidProcessIO, id: String, result: [String: Any]) {
+    private func writeResponse(_ process: any ProcessIO, id: String, result: [String: Any]) {
         guard let encoded = try? JSONRPC.encodeLine(JSONRPC.response(id: id, result: result)) else { return }
         try? process.write(encoded)
     }
@@ -488,7 +258,7 @@ actor DroidEngine {
         return params
     }
 
-    static func userMessageParams(from request: DroidRunRequest) -> [String: Any] {
+    static func userMessageParams(from request: EngineRequest) -> [String: Any] {
         var params: [String: Any] = [
             "text": request.prompt,
         ]
@@ -504,34 +274,20 @@ actor DroidEngine {
         return params
     }
 
-    static func augmentedEnvironment(
-        base: [String: String] = ProcessInfo.processInfo.environment,
-        home: String = NSHomeDirectory()
-    ) -> [String: String] {
-        var environment = base
-        let extras = [
-            "\(home)/.local/bin",
-            "\(home)/.local/share/mise/shims",
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-        ]
-        let current = environment["PATH"] ?? ""
-        environment["PATH"] = (extras + [current]).joined(separator: ":")
-        return environment
-    }
-
     static func activityLabel(for toolName: String) -> String {
         switch toolName.lowercased() {
         case "read", "readfile", "read_file":
             "Reading files…"
-        case "grep", "rg", "search":
+        case "grep", "rg", "search", "search_files":
             "Searching…"
-        case "glob", "ls", "list":
+        case "glob", "ls", "list", "list_files":
             "Listing files…"
         case "execute", "execute-cli", "bash", "shell":
             "Running a command…"
-        case "applypatch", "apply_patch", "edit":
+        case "applypatch", "apply_patch", "edit", "write":
             "Editing…"
+        case "web_search":
+            "Searching the web…"
         default:
             toolName.isEmpty ? "Working…" : "Using \(toolName)…"
         }
@@ -546,88 +302,5 @@ actor DroidEngine {
         default:
             state.replacingOccurrences(of: "_", with: " ").capitalized + "…"
         }
-    }
-}
-
-private actor RunSession {
-    let request: DroidRunRequest
-    private(set) var startedAt: Date
-    private(set) var model: String?
-    private(set) var answer = ""
-    private(set) var tokenUsage: TokenUsage?
-    private(set) var lastError: String?
-    private(set) var finished = false
-    private(set) var didInitialize = false
-
-    var isFinished: Bool { finished }
-
-    init(request: DroidRunRequest, startedAt: Date, model: String?) {
-        self.request = request
-        self.startedAt = startedAt
-        self.model = model
-    }
-
-    func setModel(_ model: String) {
-        self.model = model
-    }
-
-    func append(_ text: String) {
-        answer.append(text)
-    }
-
-    func markInitialized() {
-        didInitialize = true
-    }
-
-    func mark(error: String) {
-        // First error wins: every mark() is followed by terminate(), so a later
-        // mark (e.g. from a timeout racing process teardown) would only mask the
-        // real cause.
-        if lastError == nil { lastError = error }
-    }
-
-    func complete(durationMs: Double?, tokenUsage: TokenUsage?) {
-        self.tokenUsage = tokenUsage ?? self.tokenUsage
-        if let durationMs {
-            startedAt = Date().addingTimeInterval(-(durationMs / 1000))
-        }
-        finished = true
-    }
-
-    func snapshot() -> (
-        request: DroidRunRequest,
-        startedAt: Date,
-        model: String?,
-        answer: String,
-        tokenUsage: TokenUsage?
-    ) {
-        (request, startedAt, model, answer, tokenUsage)
-    }
-}
-
-final class LineReader: @unchecked Sendable {
-    private var buffer = Data()
-
-    func push(_ data: Data) -> [String] {
-        buffer.append(data)
-        var lines: [String] = []
-        while let range = buffer.range(of: Data([0x0A])) {
-            let lineData = buffer.subdata(in: buffer.startIndex..<range.lowerBound)
-            buffer.removeSubrange(buffer.startIndex...range.lowerBound)
-            if let line = String(data: lineData, encoding: .utf8) {
-                let cleaned = line.hasSuffix("\r") ? String(line.dropLast()) : line
-                if !cleaned.isEmpty {
-                    lines.append(cleaned)
-                }
-            }
-        }
-        return lines
-    }
-}
-
-extension String {
-    var trimmedOrNil: String? {
-        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
     }
 }

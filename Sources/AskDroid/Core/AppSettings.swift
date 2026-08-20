@@ -31,28 +31,71 @@ enum AutonomySetting: String, CaseIterable, Identifiable, Sendable {
 }
 
 enum ReasoningSetting: String, CaseIterable, Identifiable, Sendable {
-    case droidDefault = ""
+    case defaultLevel = ""
+    case off = "off"
+    case minimal = "minimal"
     case low = "low"
     case medium = "medium"
     case high = "high"
+    case xhigh = "xhigh"
+    case max = "max"
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
-        case .droidDefault: "Droid default"
+        case .defaultLevel: "Default"
+        case .off: "Off"
+        case .minimal: "Minimal"
         case .low: "Low"
         case .medium: "Medium"
         case .high: "High"
+        case .xhigh: "X-High"
+        case .max: "Max"
+        }
+    }
+
+    // Backwards compatibility for existing code referring to .droidDefault
+    static var droidDefault: ReasoningSetting { .defaultLevel }
+
+    var droidProtocolValue: String? {
+        switch self {
+        case .low: "low"
+        case .medium: "medium"
+        case .high: "high"
+        default: nil
+        }
+    }
+
+    var piProtocolValue: String? {
+        switch self {
+        case .defaultLevel: nil
+        case .off: "off"
+        case .minimal: "minimal"
+        case .low: "low"
+        case .medium: "medium"
+        case .high: "high"
+        case .xhigh: "xhigh"
+        case .max: "max"
         }
     }
 
     var protocolValue: String? {
-        rawValue.isEmpty ? nil : rawValue
+        droidProtocolValue
+    }
+
+    static func cases(for engine: Engine) -> [ReasoningSetting] {
+        switch engine {
+        case .pi:
+            allCases
+        case .droid:
+            [.defaultLevel, .low, .medium, .high]
+        }
     }
 }
 
 struct AppSettings: Equatable, Sendable {
+    var engine: Engine
     var hotkeyKeyCode: UInt32
     var hotkeyModifiers: UInt32
     var modelOverride: String
@@ -61,6 +104,7 @@ struct AppSettings: Equatable, Sendable {
     var workingDirectory: String
     var answersDirectory: String
     var droidPath: String
+    var piPath: String
     var launchAtLogin: Bool
 
     static let defaultHotkeyKeyCode: UInt32 = 2 // D
@@ -84,14 +128,16 @@ struct AppSettings: Equatable, Sendable {
 
     static var `default`: AppSettings {
         AppSettings(
+            engine: .pi,
             hotkeyKeyCode: defaultHotkeyKeyCode,
             hotkeyModifiers: defaultHotkeyModifiers,
             modelOverride: "",
-            reasoning: .droidDefault,
+            reasoning: .defaultLevel,
             autonomy: .high,
             workingDirectory: defaultWorkingDirectory,
             answersDirectory: defaultAnswersDirectory,
             droidPath: "",
+            piPath: "",
             launchAtLogin: false
         )
     }
@@ -128,9 +174,13 @@ struct AppSettings: Equatable, Sendable {
 }
 
 enum SettingsStore {
-    static func load() -> AppSettings {
-        let suite = UserDefaults.standard
+    static func load(from suite: UserDefaults = .standard) -> AppSettings {
         var settings = AppSettings.default
+        if let raw = suite.string(forKey: "engine"),
+           let value = Engine(rawValue: raw)
+        {
+            settings.engine = value
+        }
         if suite.object(forKey: "hotkeyKeyCode") != nil {
             settings.hotkeyKeyCode = UInt32(suite.integer(forKey: "hotkeyKeyCode"))
         }
@@ -169,12 +219,13 @@ enum SettingsStore {
             suite.set(settings.answersDirectory, forKey: "answersDirectory")
         }
         settings.droidPath = suite.string(forKey: "droidPath") ?? ""
+        settings.piPath = suite.string(forKey: "piPath") ?? ""
         settings.launchAtLogin = suite.bool(forKey: "launchAtLogin")
         return settings
     }
 
-    static func save(_ settings: AppSettings) {
-        let suite = UserDefaults.standard
+    static func save(_ settings: AppSettings, to suite: UserDefaults = .standard) {
+        suite.set(settings.engine.rawValue, forKey: "engine")
         suite.set(Int(settings.hotkeyKeyCode), forKey: "hotkeyKeyCode")
         suite.set(Int(settings.hotkeyModifiers), forKey: "hotkeyModifiers")
         suite.set(settings.modelOverride, forKey: "modelOverride")
@@ -183,6 +234,7 @@ enum SettingsStore {
         suite.set(settings.workingDirectory, forKey: "workingDirectory")
         suite.set(settings.answersDirectory, forKey: "answersDirectory")
         suite.set(settings.droidPath, forKey: "droidPath")
+        suite.set(settings.piPath, forKey: "piPath")
         suite.set(settings.launchAtLogin, forKey: "launchAtLogin")
     }
 }
