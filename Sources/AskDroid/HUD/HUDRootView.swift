@@ -217,7 +217,7 @@ struct ExpandedHUD: View {
                 Text(session.isSettingsOpen ? "Settings" : "AskDroid")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Theme.ink)
-                Text(session.isSettingsOpen ? "Optional overrides. Blank uses Droid defaults." : session.activity.isEmpty ? "\(session.settings.hotkeyDisplay) · ⌘↩ ask · Esc hide" : session.activity)
+                Text(session.isSettingsOpen ? "Optional overrides. Blank uses \(session.settings.engine.title) defaults." : session.activity.isEmpty ? "\(session.settings.hotkeyDisplay) · ⌘↩ ask · Esc hide" : session.activity)
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.mute)
                     .lineLimit(1)
@@ -276,7 +276,7 @@ struct ExpandedHUD: View {
 
             PromptEditor(
                 text: $session.prompt,
-                placeholder: session.images.isEmpty ? "Ask Droid anything" : "Add a note, or just send the image",
+                placeholder: session.images.isEmpty ? "Ask \(session.settings.engine.title) anything" : "Add a note, or just send the image",
                 onSubmit: session.submit,
                 onPasteImages: { session.attachFromPasteboard() },
                 onFocusChange: { fieldFocused = $0 }
