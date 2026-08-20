@@ -77,8 +77,6 @@ actor DroidEngine: EngineClient {
 
             let config = EngineProcessRunner.Configuration(
                 engine: .droid,
-                request: request,
-                runID: runID,
                 initialActivity: "Opening a Droid session…",
                 sendInitialMessage: { process, _ in
                     try process.write(try JSONRPC.encodeLine(JSONRPC.request(
@@ -96,12 +94,26 @@ actor DroidEngine: EngineClient {
                         || line.localizedCaseInsensitiveContains("FACTORY_API_KEY")
                         || line.localizedCaseInsensitiveContains("invalid api key")
                 },
-                handleLine: { [weak self] line, process, session in
-                    await self?.handle(line: line, process: process, session: session, runID: runID, onEvent: onEvent)
+                handleLine: { [weak self] line, process, session, turn, turnEnded in
+                    await self?.handle(
+                        line: line,
+                        process: process,
+                        session: session,
+                        turn: turn,
+                        turnEnded: turnEnded,
+                        turnID: runID,
+                        onEvent: onEvent
+                    )
+                },
+                onTurnEnd: { _, _ in
+                    // Engine-side bookkeeping lands with the persistent lifecycle.
+                },
+                onProcessExit: { [weak self] _ in
+                    await self?.clearActiveProcess(runID: runID)
                 }
             )
 
-            await EngineProcessRunner.run(process: process, config: config, onEvent: onEvent)
+            await EngineProcessRunner.run(process: process, request: request, turnID: runID, config: config, onEvent: onEvent)
             if activeProcess?.runID == runID {
                 activeProcess = nil
             }
@@ -119,15 +131,27 @@ actor DroidEngine: EngineClient {
         }
     }
 
+    private func clearActiveProcess(runID: UUID) {
+        if activeProcess?.runID == runID {
+            activeProcess = nil
+        }
+    }
+
     private func handle(
         line: String,
         process: any ProcessIO,
-        session: RunSession,
-        runID: UUID,
+        session: EngineSession,
+        turn: TurnState,
+        turnEnded: TurnEnder,
+        turnID: UUID,
         onEvent: @escaping @Sendable (EngineEvent) -> Void
     ) async {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, let message = try? JSONRPC.parse(trimmed) else { return }
+
+        // The turn is over; ignore stragglers. The reader keeps running for
+        // the life of the process.
+        if await turn.isEnded { return }
 
         if message["method"] as? String == "droid.request_permission",
            let id = stringID(message["id"])
@@ -145,8 +169,9 @@ actor DroidEngine: EngineClient {
 
         if let error = message["error"] as? [String: Any] {
             let detail = (error["message"] as? String) ?? "Droid request failed."
-            onEvent(.log(runID, detail))
-            await session.mark(error: detail)
+            onEvent(.log(turnID, detail))
+            await turn.appendLog(detail)
+            await turn.mark(error: detail)
             process.terminate()
             return
         }
@@ -160,71 +185,85 @@ actor DroidEngine: EngineClient {
                    let modelId = settings["modelId"] as? String
                 {
                     await session.setModel(modelId)
-                    onEvent(.log(runID, "Model \(modelId)"))
+                    onEvent(.log(turnID, "Model \(modelId)"))
                 } else if let modelId = result["modelId"] as? String {
                     await session.setModel(modelId)
-                    onEvent(.log(runID, "Model \(modelId)"))
+                    onEvent(.log(turnID, "Model \(modelId)"))
                 }
             }
-            onEvent(.activity(runID, "Sending your question…"))
+            onEvent(.activity(turnID, "Sending your question…"))
             do {
                 try process.write(try JSONRPC.encodeLine(JSONRPC.request(
                     id: "2",
                     method: "droid.add_user_message",
-                    params: Self.userMessageParams(from: session.request)
+                    params: Self.userMessageParams(from: turn.request)
                 )))
-                onEvent(.activity(runID, "Waiting for Droid…"))
-                onEvent(.log(runID, "Question sent"))
+                onEvent(.activity(turnID, "Waiting for Droid…"))
+                onEvent(.log(turnID, "Question sent"))
+                await turn.appendLog("Question sent")
             } catch {
-                await session.mark(error: error.localizedDescription)
+                await turn.mark(error: error.localizedDescription)
                 process.terminate()
             }
             return
         }
 
         if stringID(message["id"]) == "2" {
-            onEvent(.activity(runID, "Droid is working…"))
+            onEvent(.activity(turnID, "Droid is working…"))
             return
         }
 
         switch DroidNotificationParser.parse(message) {
         case .assistantTextDelta(let text):
-            await session.append(text)
-            onEvent(.textDelta(runID, text))
+            await turn.append(text)
+            onEvent(.textDelta(turnID, text))
         case .thinking(let text):
-            onEvent(.thinking(runID, text))
+            onEvent(.thinking(turnID, text))
         case .toolCall(let name, let detail):
             let label = Self.activityLabel(for: name)
-            onEvent(.activity(runID, label))
-            onEvent(.log(runID, detail.map { "\(label) \($0)" } ?? label))
+            onEvent(.activity(turnID, label))
+            let line = detail.map { "\(label) \($0)" } ?? label
+            onEvent(.log(turnID, line))
+            await turn.appendLog(line)
         case .toolProgress(let name):
             let label = Self.activityLabel(for: name)
-            onEvent(.activity(runID, label))
+            onEvent(.activity(turnID, label))
         case .toolResult(let text):
-            onEvent(.log(runID, "→ \(text)"))
+            onEvent(.log(turnID, "→ \(text)"))
+            await turn.appendLog("→ \(text)")
         case .tokenUsage(let usage):
             if let summary = usage.summary {
-                onEvent(.activity(runID, "Working… \(summary)"))
+                onEvent(.activity(turnID, "Working… \(summary)"))
             }
         case .workingState(let state):
             let label = Self.workingLabel(for: state)
-            onEvent(.activity(runID, label))
-            onEvent(.log(runID, label))
+            onEvent(.activity(turnID, label))
+            onEvent(.log(turnID, label))
+            await turn.appendLog(label)
         case .milestone(let text):
-            onEvent(.log(runID, text))
+            onEvent(.log(turnID, text))
+            await turn.appendLog(text)
         case .error(let message):
-            onEvent(.log(runID, message))
-            await session.mark(error: message)
+            onEvent(.log(turnID, message))
+            await turn.appendLog(message)
+            await turn.mark(error: message)
             process.terminate()
         case .turnCompleted(let durationMs, let usage):
-            await session.complete(durationMs: durationMs, tokenUsage: usage)
-            await EngineSupport.emitCompletion(session: session, runID: runID, engine: Engine.droid, onEvent: onEvent)
-            process.terminate()
+            if let durationMs {
+                await turn.applyDuration(durationMs: durationMs)
+            }
+            // The turn ended. Ending a turn is a protocol event — it is not
+            // process death (the runner owns the physical teardown).
+            if await turn.end(.completed, tokenUsage: usage) {
+                await turnEnded(turn, .completed)
+            }
         case .ignored:
             // Unknown session_notification subtypes are noise; anything else with a
             // method name is worth surfacing for diagnostics.
             if let method = message["method"] as? String, method != "droid.session_notification" {
-                onEvent(.log(runID, method.replacingOccurrences(of: "droid.", with: "")))
+                let line = method.replacingOccurrences(of: "droid.", with: "")
+                onEvent(.log(turnID, line))
+                await turn.appendLog(line)
             }
         }
     }

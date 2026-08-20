@@ -542,10 +542,17 @@ private final class MockProcess: DroidProcessIO, @unchecked Sendable {
     private var exited = false
     private(set) var written: [String] = []
     private(set) var terminated = false
+    private var readersClosed = false
 
     init() {
         standardOutput = stdoutPipe.fileHandleForReading
         standardError = stderrPipe.fileHandleForReading
+    }
+
+    var readersAreClosed: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return readersClosed
     }
 
     var didExit: Bool {
@@ -593,6 +600,16 @@ private final class MockProcess: DroidProcessIO, @unchecked Sendable {
 
     func closeStdout() { try? stdoutPipe.fileHandleForWriting.close() }
     func closeStderr() { try? stderrPipe.fileHandleForWriting.close() }
+
+    /// Mirrors FoundationProcess: force EOF on our side once the process is
+    /// known dead. For the mock, closing the write ends delivers real EOF.
+    func closeReaders() {
+        lock.lock()
+        readersClosed = true
+        lock.unlock()
+        closeStdout()
+        closeStderr()
+    }
 
     func setExit(_ status: Int32) {
         lock.lock()

@@ -78,14 +78,11 @@ actor PiEngine: EngineClient {
 
             let config = EngineProcessRunner.Configuration(
                 engine: .pi,
-                request: request,
-                runID: runID,
                 initialActivity: "Opening a Pi session…",
-                sendInitialMessage: { process, session in
+                sendInitialMessage: { process, _ in
                     let promptPayload = Self.promptParams(from: request)
                     let promptLine = try Self.encodeJSON(promptPayload)
                     try process.write(promptLine)
-                    await session.markPromptSent()
                     onEvent(.log(runID, "prompt sent"))
                     onEvent(.activity(runID, "Waiting for Pi…"))
                 },
@@ -99,12 +96,26 @@ actor PiEngine: EngineClient {
                         || line.localizedCaseInsensitiveContains("invalid api key")
                         || line.localizedCaseInsensitiveContains("missing api key")
                 },
-                handleLine: { [weak self] line, process, session in
-                    await self?.handle(line: line, process: process, session: session, runID: runID, onEvent: onEvent)
+                handleLine: { [weak self] line, process, session, turn, turnEnded in
+                    await self?.handle(
+                        line: line,
+                        process: process,
+                        session: session,
+                        turn: turn,
+                        turnEnded: turnEnded,
+                        turnID: runID,
+                        onEvent: onEvent
+                    )
+                },
+                onTurnEnd: { _, _ in
+                    // Engine-side bookkeeping lands with the persistent lifecycle.
+                },
+                onProcessExit: { [weak self] _ in
+                    await self?.clearActiveProcess(runID: runID)
                 }
             )
 
-            await EngineProcessRunner.run(process: process, config: config, onEvent: onEvent)
+            await EngineProcessRunner.run(process: process, request: request, turnID: runID, config: config, onEvent: onEvent)
             if activeProcess?.runID == runID {
                 activeProcess = nil
             }
@@ -122,11 +133,19 @@ actor PiEngine: EngineClient {
         }
     }
 
+    private func clearActiveProcess(runID: UUID) {
+        if activeProcess?.runID == runID {
+            activeProcess = nil
+        }
+    }
+
     private func handle(
         line: String,
         process: any ProcessIO,
-        session: RunSession,
-        runID: UUID,
+        session: EngineSession,
+        turn: TurnState,
+        turnEnded: TurnEnder,
+        turnID: UUID,
         onEvent: @escaping @Sendable (EngineEvent) -> Void
     ) async {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -135,8 +154,10 @@ actor PiEngine: EngineClient {
               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         else { return }
 
-        if await session.lastError != nil { return }
-        if await session.isFinished { return }
+        if await turn.lastError != nil { return }
+        // The turn is over; ignore stragglers. The reader keeps running for
+        // the life of the process.
+        if await turn.isEnded { return }
 
         guard let type = json["type"] as? String else { return }
 
@@ -147,49 +168,55 @@ actor PiEngine: EngineClient {
             if command == "prompt" {
                 if success {
                     await session.markAccepted()
-                    onEvent(.activity(runID, "Pi is working…"))
+                    onEvent(.activity(turnID, "Pi is working…"))
                 } else {
                     let error = (json["error"] as? String) ?? (json["message"] as? String) ?? "Pi rejected the prompt."
-                    onEvent(.log(runID, error))
-                    await session.mark(error: error)
+                    onEvent(.log(turnID, error))
+                    await turn.appendLog(error)
+                    await turn.mark(error: error)
                     process.terminate()
                 }
             } else if !success {
                 let error = (json["error"] as? String) ?? "Pi command failed."
-                onEvent(.log(runID, error))
+                onEvent(.log(turnID, error))
+                await turn.appendLog(error)
             }
 
         case "extension_error":
             let error = (json["error"] as? String) ?? "Extension error."
-            onEvent(.log(runID, error))
-            await session.mark(error: error)
+            onEvent(.log(turnID, error))
+            await turn.appendLog(error)
+            await turn.mark(error: error)
             process.terminate()
 
         case "auto_retry_start":
             let attempt = json["attempt"] as? Int ?? 1
             let maxAttempts = json["maxAttempts"] as? Int ?? 3
             let errMsg = json["errorMessage"] as? String ?? ""
-            onEvent(.log(runID, "Retry \(attempt)/\(maxAttempts): \(errMsg)"))
-            onEvent(.activity(runID, "Retrying… (\(attempt)/\(maxAttempts))"))
+            let line = "Retry \(attempt)/\(maxAttempts): \(errMsg)"
+            onEvent(.log(turnID, line))
+            await turn.appendLog(line)
+            onEvent(.activity(turnID, "Retrying… (\(attempt)/\(maxAttempts))"))
 
         case "auto_retry_end":
             let success = json["success"] as? Bool ?? false
             if !success {
                 let finalError = (json["finalError"] as? String) ?? (json["errorMessage"] as? String) ?? "Auto retry failed."
-                onEvent(.log(runID, finalError))
+                onEvent(.log(turnID, finalError))
+                await turn.appendLog(finalError)
                 if finalError.localizedCaseInsensitiveContains("auth_unavailable")
                     || finalError.localizedCaseInsensitiveContains("no auth available")
                     || finalError.localizedCaseInsensitiveContains("not authenticated")
                 {
-                    await session.mark(error: EngineError.notAuthenticated(Engine.pi).localizedDescription)
+                    await turn.mark(error: EngineError.notAuthenticated(Engine.pi).localizedDescription)
                 } else {
-                    await session.mark(error: finalError)
+                    await turn.mark(error: finalError)
                 }
                 process.terminate()
             }
 
         case "agent_start", "turn_start":
-            onEvent(.activity(runID, "Pi is working…"))
+            onEvent(.activity(turnID, "Pi is working…"))
 
         case "message_start", "message_end", "turn_end":
             if let msg = json["message"] as? [String: Any],
@@ -201,12 +228,13 @@ actor PiEngine: EngineClient {
                 if let usageDict = msg["usage"] as? [String: Any],
                    let usage = Self.tokenUsage(from: usageDict)
                 {
-                    await session.setUsage(usage)
+                    await turn.setUsage(usage)
                 }
                 if let stopReason = msg["stopReason"] as? String, stopReason == "error" {
                     let errMsg = (msg["errorMessage"] as? String) ?? "Model error occurred."
-                    onEvent(.log(runID, errMsg))
-                    await session.mark(error: errMsg)
+                    onEvent(.log(turnID, errMsg))
+                    await turn.appendLog(errMsg)
+                    await turn.mark(error: errMsg)
                     process.terminate()
                 }
             }
@@ -215,7 +243,7 @@ actor PiEngine: EngineClient {
             if let usageDict = json["usage"] as? [String: Any],
                let usage = Self.tokenUsage(from: usageDict)
             {
-                await session.setUsage(usage)
+                await turn.setUsage(usage)
             }
             if let assistantEvent = json["assistantMessageEvent"] as? [String: Any],
                let eventType = assistantEvent["type"] as? String
@@ -223,12 +251,12 @@ actor PiEngine: EngineClient {
                 switch eventType {
                 case "text_delta":
                     if let delta = assistantEvent["delta"] as? String, !delta.isEmpty {
-                        await session.append(delta)
-                        onEvent(.textDelta(runID, delta))
+                        await turn.append(delta)
+                        onEvent(.textDelta(turnID, delta))
                     }
                 case "thinking_delta":
                     if let delta = assistantEvent["delta"] as? String, !delta.isEmpty {
-                        onEvent(.thinking(runID, delta))
+                        onEvent(.thinking(turnID, delta))
                     }
                 default:
                     break
@@ -238,23 +266,27 @@ actor PiEngine: EngineClient {
         case "tool_execution_start":
             let toolName = (json["toolName"] as? String) ?? "tool"
             let label = Self.activityLabel(for: toolName)
-            onEvent(.activity(runID, label))
+            onEvent(.activity(turnID, label))
             if let args = json["args"] as? [String: Any],
                let detail = Self.toolDetail(from: args)
             {
-                onEvent(.log(runID, "\(label) \(detail)"))
+                let line = "\(label) \(detail)"
+                onEvent(.log(turnID, line))
+                await turn.appendLog(line)
             } else {
-                onEvent(.log(runID, label))
+                onEvent(.log(turnID, label))
+                await turn.appendLog(label)
             }
 
         case "tool_execution_update":
             let toolName = (json["toolName"] as? String) ?? "tool"
             let label = Self.activityLabel(for: toolName)
-            onEvent(.activity(runID, label))
+            onEvent(.activity(turnID, label))
 
         case "tool_execution_end":
             if let isError = json["isError"] as? Bool, isError {
-                onEvent(.log(runID, "Tool execution error"))
+                onEvent(.log(turnID, "Tool execution error"))
+                await turn.appendLog("Tool execution error")
             }
 
         case "agent_end":
@@ -266,17 +298,23 @@ actor PiEngine: EngineClient {
                     if let usageDict = msg["usage"] as? [String: Any],
                        let usage = Self.tokenUsage(from: usageDict)
                     {
-                        await session.setUsage(usage)
+                        await turn.setUsage(usage)
                     }
                 }
             }
 
         case "agent_settled":
-            if await session.lastError == nil {
-                await session.complete()
-                await EngineSupport.emitCompletion(session: session, runID: runID, engine: Engine.pi, onEvent: onEvent)
+            // The real turn boundary. `agent_end` above is only one low-level
+            // run; retries and compaction may follow it before this point.
+            if await turn.lastError == nil {
+                if await turn.end(.completed) {
+                    await turnEnded(turn, .completed)
+                }
+            } else {
+                if await turn.end(.failed) {
+                    await turnEnded(turn, .failed)
+                }
             }
-            process.terminate()
 
         case "extension_ui_request":
             if let id = json["id"] as? String,
