@@ -1667,6 +1667,16 @@ final class AskSessionTests: XCTestCase {
         XCTAssertEqual(session.contextStats?.label, "ctx 14.6k / 922k")
     }
 
+    func testContextStatsReplacementNeverMixesPairs() {
+        // Pi can change its reported window mid-conversation (model switch).
+        // Each reading replaces the previous one whole — a new turn's tokens
+        // must never pair with an older turn's window.
+        let session = makeSession(launcher: MockLauncher())
+        session.handle(.contextStats(used: 11_400, limit: 922_000))
+        session.handle(.contextStats(used: 11_400, limit: 262_144))
+        XCTAssertEqual(session.contextStats, ContextStats(used: 11_400, limit: 262_144))
+    }
+
     func testContextStatsLabelHandlesSmallAndHugeFills() {
         XCTAssertEqual(ContextStats(used: 512, limit: 200_000).label, "ctx 512 / 200k")
         XCTAssertEqual(ContextStats(used: 60_000, limit: 200_000).label, "ctx 60.0k / 200k")
@@ -1680,6 +1690,83 @@ final class AskSessionTests: XCTestCase {
         XCTAssertEqual(session.expandedTurnIDs, [id])
         session.toggleExpandedRow(id)
         XCTAssertTrue(session.expandedTurnIDs.isEmpty)
+    }
+
+    // MARK: Header lines (operator fix batch)
+
+    func testHeaderPrimaryLeadsWithNewestQuestion() {
+        XCTAssertEqual(
+            HeaderLines.primary(isSettingsOpen: true, newestQuestion: "q?", sessionTitle: "title"),
+            "Settings"
+        )
+        // While a conversation is on screen, the visible topic leads even
+        // when a session title names an earlier one.
+        XCTAssertEqual(
+            HeaderLines.primary(isSettingsOpen: false, newestQuestion: "and its wingspan?", sessionTitle: "what is a pelican?"),
+            "and its wingspan?"
+        )
+        XCTAssertEqual(
+            HeaderLines.primary(isSettingsOpen: false, newestQuestion: "", sessionTitle: "what is a pelican?"),
+            "Look at the attached image(s)."
+        )
+        // No live turn: the title (or app name) stands.
+        XCTAssertEqual(
+            HeaderLines.primary(isSettingsOpen: false, newestQuestion: nil, sessionTitle: "what is a pelican?"),
+            "what is a pelican?"
+        )
+        XCTAssertEqual(
+            HeaderLines.primary(isSettingsOpen: false, newestQuestion: nil, sessionTitle: nil),
+            "AskDroid"
+        )
+    }
+
+    func testHeaderSecondaryDemotesTitleOnlyWhenItDiffers() {
+        // Live activity wins while streaming, even when a title differs.
+        XCTAssertEqual(
+            HeaderLines.secondary(
+                isSettingsOpen: false, phase: .running, activity: "Reading files…",
+                newestQuestion: "and its wingspan?", sessionTitle: "what is a pelican?",
+                hotkeyDisplay: "⌥Space", engineTitle: "Pi"
+            ),
+            "Reading files…"
+        )
+        // Settled: the title drops to the secondary line.
+        XCTAssertEqual(
+            HeaderLines.secondary(
+                isSettingsOpen: false, phase: .completed, activity: "Done",
+                newestQuestion: "and its wingspan?", sessionTitle: "what is a pelican?",
+                hotkeyDisplay: "⌥Space", engineTitle: "Pi"
+            ),
+            "what is a pelican?"
+        )
+        // Title identical to the primary disappears; the hint returns.
+        XCTAssertEqual(
+            HeaderLines.secondary(
+                isSettingsOpen: false, phase: .completed, activity: "",
+                newestQuestion: "what is a pelican?", sessionTitle: "what is a pelican?",
+                hotkeyDisplay: "⌥Space", engineTitle: "Pi"
+            ),
+            "⌥Space · ⌘↩ ask · Esc hide"
+        )
+        // No title at all → hint.
+        XCTAssertEqual(
+            HeaderLines.secondary(
+                isSettingsOpen: false, phase: .idle, activity: "",
+                newestQuestion: nil, sessionTitle: nil,
+                hotkeyDisplay: "⌥Space", engineTitle: "Pi"
+            ),
+            "⌥Space · ⌘↩ ask · Esc hide"
+        )
+    }
+
+    func testThinkingPreviewIsTailOfCollapsedText() {
+        XCTAssertEqual(ThinkingPreview.line(from: "short thought"), "short thought")
+        XCTAssertEqual(ThinkingPreview.line(from: "a\n b\t\tc"), "a b c")
+        let long = String(repeating: "x", count: 200)
+        let preview = ThinkingPreview.line(from: long)
+        XCTAssertEqual(preview.count, ThinkingPreview.characterLimit + 1, "ellipsis plus the tail")
+        XCTAssertTrue(preview.hasPrefix("…"))
+        XCTAssertTrue(long.hasSuffix(String(preview.dropFirst())), "preview must come from the end")
     }
 
     func testRetryFailedTurnResubmitsItsQuestion() async {
@@ -2404,6 +2491,74 @@ final class PiEngineStateMachineTests: XCTestCase {
             return nil
         }
         XCTAssertTrue(failures.isEmpty, "steer rejection surfaced as a turn failure: \(failures)")
+        await engine.close(handle)
+    }
+
+    /// The contextUsage flip the operator saw (922k → 262k mid-conversation)
+    /// is Pi switching its reported window (it mirrors the active model, per
+    /// rpc.md). Our contract: parse exactly `data.contextUsage`'s
+    /// tokens/contextWindow, omit on nulls/absence, and replace each new
+    /// reading wholesale — never merge one turn's tokens with another
+    /// turn's window.
+    func testPiContextStatsParsesDocumentedShapeAndReplacesWholesale() async throws {
+        let launcher = MockLauncher()
+        let engine = PiEngine(launcher: launcher, fileExists: { _ in true })
+        let box = EventBox()
+        let settings = Self.makeMultiTurnSettings()
+
+        let handle = try await startSession(engine, settings: settings, box: box)
+        let process = launcher.processes[0]
+
+        let turn1 = UUID()
+        let send1 = Task.detached {
+            await engine.send(EngineRequest(prompt: "one", images: [], settings: settings), turnID: turn1, to: handle)
+        }
+        await waitForWritten(process, contains: #""type":"prompt""#)
+
+        // Documented shape.
+        process.feedStdout(
+            #"{"type":"response","command":"get_session_stats","success":true,"data":{"contextUsage":{"tokens":11400,"contextWindow":922000,"percent":1}}}"#
+        )
+        var sawStats = await waitFor {
+            box.snapshot().contains { if case .contextStats = $0 { return true }; return false }
+        }
+        XCTAssertTrue(sawStats)
+        // A different window mid-session replaces the pair wholesale.
+        process.feedStdout(
+            #"{"type":"response","command":"get_session_stats","success":true,"data":{"contextUsage":{"tokens":11400,"contextWindow":262144,"percent":4}}}"#
+        )
+        sawStats = await waitFor {
+            box.snapshot().compactMap { event -> Bool in
+                if case .contextStats(let used, let limit) = event { return used == 11_400 && limit == 262_144 }
+                return false
+            }.contains(true)
+        }
+        XCTAssertTrue(sawStats, "new window never landed")
+
+        let stats = box.snapshot().compactMap { event -> String? in
+            if case .contextStats(let used, let limit) = event { return "\(used)/\(limit)" }
+            return nil
+        }
+        XCTAssertEqual(stats, ["11400/922000", "11400/262144"], "pairs must be atomic, never field-merged")
+
+        // Null fields right after compaction emit nothing…
+        let beforeNulls = stats.count
+        process.feedStdout(
+            #"{"type":"response","command":"get_session_stats","success":true,"data":{"contextUsage":{"tokens":null,"contextWindow":262144,"percent":null}}}"#
+        )
+        // …and a response without contextUsage emits nothing either.
+        process.feedStdout(
+            #"{"type":"response","command":"get_session_stats","success":true,"data":{"sessionId":"x"}}"#
+        )
+        try? await Task.sleep(for: .milliseconds(150))
+        let afterGaps = box.snapshot().compactMap { event -> String? in
+            if case .contextStats(let used, let limit) = event { return "\(used)/\(limit)" }
+            return nil
+        }
+        XCTAssertEqual(afterGaps.count, beforeNulls, "null or absent contextUsage must not emit")
+
+        process.feedStdout(#"{"type":"agent_settled"}"#)
+        await send1.value
         await engine.close(handle)
     }
 

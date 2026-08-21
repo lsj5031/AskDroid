@@ -2,6 +2,70 @@ import MarkdownUI
 import SwiftUI
 import UniformTypeIdentifiers
 
+extension AnswerScrollAnchor {
+    /// The newest turn's question line, used to keep the live topic visible
+    /// at turn start and completion.
+    static let question = "answer-question"
+}
+
+/// Resolves the expanded header's two lines. The newest turn's question
+/// leads while a conversation is on screen — a session title naming an
+/// earlier topic above a different answer reads as broken. The title drops
+/// to the secondary line (unless it IS the topic) whenever nothing live is
+/// talking.
+enum HeaderLines {
+    static func primary(
+        isSettingsOpen: Bool,
+        newestQuestion: String?,
+        sessionTitle: String?
+    ) -> String {
+        if isSettingsOpen { return "Settings" }
+        if let newestQuestion {
+            return newestQuestion.isEmpty ? "Look at the attached image(s)." : newestQuestion
+        }
+        return sessionTitle ?? "AskDroid"
+    }
+
+    static func secondary(
+        isSettingsOpen: Bool,
+        phase: AskSession.Phase,
+        activity: String,
+        newestQuestion: String?,
+        sessionTitle: String?,
+        hotkeyDisplay: String,
+        engineTitle: String
+    ) -> String? {
+        if isSettingsOpen {
+            return "Optional overrides. Blank uses \(engineTitle) defaults."
+        }
+        // Live status wins while a turn streams.
+        if phase == .running, !activity.isEmpty {
+            return activity
+        }
+        if let sessionTitle, !sessionTitle.isEmpty,
+           sessionTitle != primary(
+            isSettingsOpen: isSettingsOpen,
+            newestQuestion: newestQuestion,
+            sessionTitle: sessionTitle
+           ) {
+            return sessionTitle
+        }
+        return "\(hotkeyDisplay) · ⌘↩ ask · Esc hide"
+    }
+}
+
+/// One-line preview for the collapsed thinking disclosure: the tail of the
+/// reasoning, whitespace-collapsed.
+enum ThinkingPreview {
+    static let characterLimit = 80
+
+    static func line(from thinking: String) -> String {
+        let collapsed = thinking.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        guard collapsed.count > characterLimit else { return collapsed }
+        return "…\(collapsed.suffix(characterLimit))"
+    }
+}
+
 struct HUDRootView: View {
     @ObservedObject var session: AskSession
     var metrics: NotchMetrics
@@ -135,6 +199,7 @@ struct ExpandedHUD: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isDropTargeted = false
     @State private var activityLogExpanded = false
+    @State private var thinkingExpanded = false
     @State private var fieldFocused = false
     @State private var answerContentHeight: CGFloat = 0
     @State private var answerContentMinY: CGFloat = 0
@@ -213,16 +278,31 @@ struct ExpandedHUD: View {
         HStack(spacing: 10) {
             StatusDot(phase: session.phase)
             VStack(alignment: .leading, spacing: 1) {
-                Text(session.isSettingsOpen ? "Settings" : (session.sessionTitle ?? "AskDroid"))
+                Text(HeaderLines.primary(
+                    isSettingsOpen: session.isSettingsOpen,
+                    newestQuestion: session.transcript.last?.question,
+                    sessionTitle: session.sessionTitle
+                ))
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Theme.ink)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .help(session.sessionTitle ?? "")
-                Text(session.isSettingsOpen ? "Optional overrides. Blank uses \(session.settings.engine.title) defaults." : session.activity.isEmpty ? "\(session.settings.hotkeyDisplay) · ⌘↩ ask · Esc hide" : session.activity)
-                    .font(.system(size: 11))
-                    .foregroundStyle(Theme.mute)
-                    .lineLimit(1)
+                    .help(session.transcript.last?.question ?? session.sessionTitle ?? "")
+                if let secondary = HeaderLines.secondary(
+                    isSettingsOpen: session.isSettingsOpen,
+                    phase: session.phase,
+                    activity: session.activity,
+                    newestQuestion: session.transcript.last?.question,
+                    sessionTitle: session.sessionTitle,
+                    hotkeyDisplay: session.settings.hotkeyDisplay,
+                    engineTitle: session.settings.engine.title
+                ) {
+                    Text(secondary)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.mute)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
             }
             Spacer()
             IconButton(systemName: session.isSettingsOpen ? "chevron.left" : "gearshape", label: session.isSettingsOpen ? "Back" : "Settings") {
@@ -269,8 +349,7 @@ struct ExpandedHUD: View {
                         newestTurnContent
                         Color.clear
                             .frame(height: 1)
-                            .id(AnswerScrollAnchor.bottom)
-                    }
+                            .id(AnswerScrollAnchor.bottom)                    }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 20)
                     .padding(.vertical, 16)
@@ -289,9 +368,10 @@ struct ExpandedHUD: View {
                     }
                 }
                 .frame(maxHeight: 280)
-                // Stay pinned to the bottom while streaming so new text is
-                // always visible; the user can scroll up to detach.
-                .defaultScrollAnchor(.bottom)
+                // Positioning is programmatic: turn start and completion pin
+                // the newest question near the top; streaming follows the
+                // bottom only while the user hasn't scrolled away (see the
+                // answerContentHeight change handler below).
                 .coordinateSpace(name: AnswerScrollSpace.name)
                 .background {
                     GeometryReader { proxy in
@@ -319,12 +399,31 @@ struct ExpandedHUD: View {
             .onPreferenceChange(AnswerContentHeightKey.self) { answerContentHeight = $0 }
             .onPreferenceChange(AnswerContentMinYKey.self) { answerContentMinY = $0 }
             .onPreferenceChange(AnswerViewportHeightKey.self) { answerViewportHeight = $0 }
+            .onChange(of: answerContentHeight) { _, _ in
+                // Follow the stream while it grows, but only while the user
+                // hasn't scrolled up to detach (answerIsNearBottom).
+                guard session.phase == .running, answerIsNearBottom else { return }
+                followAnswer(proxy)
+            }
+            .onChange(of: session.transcript.count) { _, _ in
+                // Turn start: lead with the new question, history above the
+                // fold. At this point the answer is empty, so the question
+                // sits at the top of a short page and streaming can still
+                // pin to the bottom seamlessly.
+                thinkingExpanded = false
+                scrollToQuestion(proxy)
+            }
             .onChange(of: session.phase) { _, phase in
                 switch phase {
-                case .failed:
-                    activityLogExpanded = true
                 case .running:
                     activityLogExpanded = false
+                case .completed, .interrupted:
+                    // The turn settled: bring the question back into view
+                    // with its answer below it.
+                    scrollToQuestion(proxy)
+                case .failed:
+                    activityLogExpanded = true
+                    scrollToQuestion(proxy)
                 default:
                     break
                 }
@@ -333,6 +432,7 @@ struct ExpandedHUD: View {
                 if session.phase == .failed {
                     activityLogExpanded = true
                 }
+                scrollToQuestion(proxy)
             }
         }
     }
@@ -350,6 +450,7 @@ struct ExpandedHUD: View {
                 .foregroundStyle(Theme.mute)
                 .lineSpacing(2)
                 .textSelection(.enabled)
+                .id(AnswerScrollAnchor.question)
             if session.phase == .failed, let errorMessage = session.errorMessage {
                 failureBlock(errorMessage)
             }
@@ -359,12 +460,28 @@ struct ExpandedHUD: View {
                     .foregroundStyle(Theme.dangerText)
                     .textSelection(.enabled)
             }
-            if !session.thinking.isEmpty, session.answer.isEmpty || session.phase == .running {
-                Text(session.thinking)
-                    .font(.system(size: 12))
-                    .foregroundStyle(Theme.mute)
-                    .lineSpacing(2)
-                    .textSelection(.enabled)
+            if session.phase == .running, !session.thinking.isEmpty {
+                // One collapsible line while streaming: a full thinking
+                // paragraph pushes the answer below the fold. The reasoning
+                // stays on the Turn for the transcript's expanded rows.
+                DisclosureGroup(isExpanded: $thinkingExpanded) {
+                    Text(session.thinking)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.mute)
+                        .lineSpacing(2)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } label: {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text("Thinking…")
+                        Text(ThinkingPreview.line(from: session.thinking))
+                            .font(.system(size: 11))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    }
+                }
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.mute)
             }
             if !session.answer.isEmpty {
                 Markdown(session.answer)
@@ -503,6 +620,14 @@ struct ExpandedHUD: View {
     private func followAnswer(_ proxy: ScrollViewProxy) {
         withAnimation(.easeOut(duration: 0.18)) {
             proxy.scrollTo(AnswerScrollAnchor.bottom, anchor: .bottom)
+        }
+    }
+
+    /// Leads with the newest turn's question: history folds above it, the
+    /// answer reads below it.
+    private func scrollToQuestion(_ proxy: ScrollViewProxy) {
+        withAnimation(.easeOut(duration: 0.18)) {
+            proxy.scrollTo(AnswerScrollAnchor.question, anchor: .top)
         }
     }
 
