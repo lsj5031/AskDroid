@@ -227,7 +227,7 @@ actor DroidEngine: EngineClient {
             if let id = stringID(message["id"]), let kind = await session.requestKind(for: id) {
                 await session.fulfillRequest(id: id)
                 switch kind {
-                case .contextStats, .interrupt, .closeSession:
+                case .contextStats, .interrupt, .closeSession, .steer:
                     // Bookkeeping requests must not tear down the session.
                     fatal = false
                 case .initialize, .userMessage:
@@ -275,7 +275,7 @@ actor DroidEngine: EngineClient {
                     onEvent(.contextStats(used: used, limit: limit))
                 }
                 return
-            case .interrupt, .closeSession:
+            case .interrupt, .closeSession, .steer:
                 return
             }
         }

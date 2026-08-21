@@ -417,7 +417,7 @@ struct ExpandedHUD: View {
 
             PromptEditor(
                 text: $session.prompt,
-                placeholder: session.images.isEmpty ? "Ask \(session.settings.engine.title) anything" : "Add a note, or just send the image",
+                placeholder: composerPlaceholder,
                 onSubmit: session.submit,
                 onPasteImages: { session.attachFromPasteboard() },
                 onFocusChange: { fieldFocused = $0 }
@@ -431,6 +431,28 @@ struct ExpandedHUD: View {
             .overlay {
                 RoundedRectangle(cornerRadius: Theme.fieldCorner, style: .continuous)
                     .stroke(fieldFocused ? Theme.accent.opacity(0.85) : Theme.hairline, lineWidth: 1)
+            }
+
+            if !session.pendingMessages.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Queued")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Theme.mute)
+                    ForEach(Array(session.pendingMessages.enumerated()), id: \.offset) { _, message in
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Image(systemName: "clock")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(Theme.accent)
+                            Text(message)
+                                .font(.system(size: 12))
+                                .foregroundStyle(Theme.mute)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                    }
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Queued messages: \(session.pendingMessages.joined(separator: ", "))")
             }
 
             if let notice = session.notice {
@@ -448,14 +470,22 @@ struct ExpandedHUD: View {
                 .labelStyle(.titleAndIcon)
                 .animation(.easeOut(duration: 0.12), value: isDropTargeted)
                 Spacer()
-                Button("Ask", action: session.submit)
+                Button(session.phase == .running ? "Queue" : "Ask", action: session.submit)
                     .buttonStyle(PrimaryButtonStyle())
                     .disabled(!session.canSubmit)
                     .keyboardShortcut(.return, modifiers: .command)
+                    .help(session.phase == .running ? "Send while the current turn is working" : "Send")
             }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 16)
+    }
+
+    private var composerPlaceholder: String {
+        if session.phase == .running {
+            return "Steer while \(session.settings.engine.title) works…"
+        }
+        return session.images.isEmpty ? "Ask \(session.settings.engine.title) anything" : "Add a note, or just send the image"
     }
 
     private var answerIsNearBottom: Bool {

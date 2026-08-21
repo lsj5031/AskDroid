@@ -21,6 +21,16 @@ protocol EngineClient: AnyObject, Sendable {
     /// Stop the current turn. The session stays usable.
     func interrupt(_ handle: SessionHandle) async
 
+    /// Deliver input while a turn is streaming (plan 008 Phase 7). Engines
+    /// without a usable wire path throw `.steeringUnsupported`; the session
+    /// then queues the message client-side instead.
+    func queue(_ request: EngineRequest, to handle: SessionHandle) async throws
+
+    /// Whether `queue(_:)` injects input into the live turn on the wire.
+    /// Engines without wire steering have their steered messages queued
+    /// client-side by the session and sent as the next turn instead.
+    var steersOnWire: Bool { get }
+
     /// Clear conversation context without dropping the session where the
     /// engine supports it.
     func reset(_ handle: SessionHandle) async
@@ -49,11 +59,11 @@ extension EngineClient {
         await handle.send(request, turnID: turnID)
     }
 
-    /// Deliver input while a turn is streaming (plan 008 Phase 7). Engines
-    /// that gain steering override this.
     func queue(_ request: EngineRequest, to handle: SessionHandle) async throws {
-        throw EngineError.failed("Steering isn't supported on this engine yet.")
+        throw EngineError.steeringUnsupported(await handle.engine)
     }
+
+    var steersOnWire: Bool { false }
 }
 
 enum Engine: String, CaseIterable, Identifiable, Sendable {
@@ -83,6 +93,8 @@ enum EngineError: LocalizedError, Equatable {
     case protocolFailure(String)
     case cancelled
     case failed(String)
+    /// The engine has no wire path for mid-turn input (plan 008 Phase 7).
+    case steeringUnsupported(Engine)
 
     // Backwards-compatibility helpers for legacy call sites
     static var binaryNotFound: EngineError { .binaryNotFound(.droid) }
@@ -100,6 +112,8 @@ enum EngineError: LocalizedError, Equatable {
             "Cancelled."
         case .failed(let message):
             message
+        case .steeringUnsupported(let engine):
+            "Steering isn't supported on \(engine.title) yet. Wait for the current turn to finish."
         }
     }
 }
@@ -279,6 +293,8 @@ actor EngineSession {
         case interrupt
         case contextStats
         case closeSession
+        /// A steered prompt sent while another turn is streaming.
+        case steer
     }
 
     let engine: Engine

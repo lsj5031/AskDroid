@@ -73,6 +73,10 @@ final class AskSession: ObservableObject {
     /// view) so the panel's reposition sinks can track it.
     @Published var expandedTurnIDs: Set<UUID> = []
     @Published var contextStats: ContextStats?
+    /// Messages typed while a turn is streaming. Wire-steering engines
+    /// mirror their remote queue here; other engines hold the message until
+    /// the running turn settles and it auto-sends as the next one.
+    @Published var pendingMessages: [String] = []
     @Published var answer = ""
     @Published var thinking = ""
     @Published var activity = ""
@@ -204,10 +208,14 @@ final class AskSession: ObservableObject {
 
     // MARK: Conversation lifecycle
 
-    /// Sends a follow-up turn. Prior turns stay in the transcript; only the
-    /// composer empties.
+    /// Sends a follow-up turn, or steers the running one. Prior turns stay
+    /// in the transcript; only the composer empties.
     func submit() {
-        guard canSubmit, phase != .running else { return }
+        guard canSubmit else { return }
+        if phase == .running {
+            steerRunningTurn()
+            return
+        }
         let turnID = UUID()
         let request = EngineRequest(
             prompt: prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -256,6 +264,52 @@ final class AskSession: ObservableObject {
             guard let handle = await self.ensureSession(client) else { return }
             await client.send(request, turnID: turnID, to: handle)
         }
+    }
+
+    /// Delivers input into the turn that is currently streaming (plan 008
+    /// Phase 7). Wire-steering engines inject it immediately; the rest hold
+    /// it client-side and auto-send it as the next turn on settle.
+    private func steerRunningTurn() {
+        let request = EngineRequest(
+            prompt: prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? "Look at the attached image(s)."
+                : prompt,
+            images: images,
+            settings: settings
+        )
+        guard let handle = activeHandle else { return }
+        pendingMessages.append(request.prompt)
+        prompt = ""
+        images = []
+        let client = self.engine
+        guard client.steersOnWire else { return }
+        Task { [client, weak self] in
+            do {
+                try await client.queue(request, to: handle)
+            } catch {
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    // Nothing was delivered; give the message back.
+                    pendingMessages.removeAll { $0 == request.prompt }
+                    prompt = prompt.isEmpty ? request.prompt : prompt + "\n" + request.prompt
+                    notice = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    /// Runs when a turn settles. Wire-steered messages were already delivered
+    /// by the engine, so the pending mirror clears; client-side queued
+    /// messages auto-send as the next turn.
+    private func settlePendingQueue() {
+        if engine.steersOnWire {
+            pendingMessages = []
+            return
+        }
+        guard !pendingMessages.isEmpty else { return }
+        let next = pendingMessages.removeFirst()
+        prompt = next
+        submit()
     }
 
     /// Stops the running turn without ending the conversation. The composer
@@ -498,8 +552,15 @@ final class AskSession: ObservableObject {
             break
         case .contextStats(let used, let limit):
             contextStats = ContextStats(used: used, limit: limit)
-        case .queueChanged:
-            break // steering lands in plan 008 Phase 7
+        case .queueChanged(let messages):
+            // Authoritative while a turn streams (Pi's queue_update). A
+            // delivery after settle is stale — the pending mirror cleared
+            // when the turn ended.
+            if phase == .running {
+                pendingMessages = messages
+            } else {
+                pendingMessages = []
+            }
         case .sessionEnded(let reason):
             sessionDidEnd(reason)
         }
@@ -570,6 +631,7 @@ final class AskSession: ObservableObject {
             AskLog.line("turn \(turnID.uuidString.prefix(8)) completed archive=\(result.archiveURL?.lastPathComponent ?? "none") archiveError=\(result.archiveError ?? "none")")
             notifyIfCollapsed(success: true)
         }
+        settlePendingQueue()
     }
 
     private func failTurn(_ turnID: UUID, _ message: String) {
@@ -584,6 +646,7 @@ final class AskSession: ObservableObject {
             phase = .failed
             AskLog.line("turn \(turnID.uuidString.prefix(8)) failed: \(message)")
             notifyIfCollapsed(success: false)
+            settlePendingQueue()
         }
     }
 
@@ -595,6 +658,7 @@ final class AskSession: ObservableObject {
         if turnID == currentRunID, phase == .running {
             activity = "Interrupted"
             phase = .interrupted
+            settlePendingQueue()
         }
     }
 
@@ -604,6 +668,7 @@ final class AskSession: ObservableObject {
         replaceTurn(turn)
         activity = "Interrupted"
         phase = .interrupted
+        settlePendingQueue()
     }
 
     private func replaceTurn(_ turn: Turn) {
@@ -652,6 +717,7 @@ final class AskSession: ObservableObject {
         copied = false
         notice = nil
         contextStats = nil
+        pendingMessages = []
         expandedTurnIDs = []
         activity = ""
         currentRunID = nil

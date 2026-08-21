@@ -114,6 +114,22 @@ actor PiEngine: EngineClient {
         return handle
     }
 
+    /// Wire steering (plan 008 Phase 7, verified against the CLI): a prompt
+    /// sent while a turn is streaming must carry `streamingBehavior: "steer"`
+    /// or Pi rejects it. Pi acknowledges on the stream and emits
+    /// `queue_update` as the queue changes.
+    func queue(_ request: EngineRequest, to handle: SessionHandle) async throws {
+        guard let state = await handle.state else {
+            throw EngineError.failed("No live \(Engine.pi.title) session.")
+        }
+        let id = await state.registerRequest(as: .steer)
+        var params = Self.promptParams(id: id, from: request)
+        params["streamingBehavior"] = "steer"
+        try await handle.writeLine(Self.encodeJSON(params))
+    }
+
+    nonisolated var steersOnWire: Bool { true }
+
     func interrupt(_ handle: SessionHandle) async {
         if let line = try? Self.encodeJSON(["type": "abort"]) {
             try? await handle.writeLine(line)
@@ -186,6 +202,28 @@ actor PiEngine: EngineClient {
         else { return }
 
         let turnID = turn.turnID
+
+        // A steered prompt's ack is correlated by its registered request id;
+        // it must take the session-scoped path so a rejection cannot tear
+        // down the turn that is still streaming.
+        var steerAck = false
+        if json["type"] as? String == "response",
+           json["command"] as? String == "prompt",
+           let id = json["id"] as? String,
+           let kind = await session.requestKind(for: id)
+        {
+            await session.fulfillRequest(id: id)
+            steerAck = kind == .steer
+            if steerAck {
+                if json["success"] as? Bool == true {
+                    onEvent(.log(turnID, "steer accepted"))
+                } else {
+                    let error = (json["error"] as? String) ?? (json["message"] as? String) ?? "Pi rejected the steered message."
+                    onEvent(.log(turnID, error))
+                }
+                return
+            }
+        }
 
         // Session-scoped responses can arrive after the turn ended (context
         // stats); dispatch them before the turn gates.
@@ -370,6 +408,13 @@ actor PiEngine: EngineClient {
             } else {
                 await turnEnded(turn, .failed)
             }
+
+        case "queue_update":
+            // Authoritative steering/follow-up queue state (plan 008
+            // Phase 7). The session mirrors this as the pending list.
+            let steering = json["steering"] as? [String] ?? []
+            let followUp = json["followUp"] as? [String] ?? []
+            onEvent(.queueChanged(steering + followUp))
 
         case "extension_ui_request":
             if let id = json["id"] as? String,
