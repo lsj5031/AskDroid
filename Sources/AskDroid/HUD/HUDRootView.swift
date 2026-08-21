@@ -337,11 +337,15 @@ struct ExpandedHUD: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
                         ForEach(priorTurns) { turn in
-                            CollapsedTurnRow(
-                                turn: turn,
-                                isExpanded: session.expandedTurnIDs.contains(turn.id),
-                                onToggle: { session.toggleExpandedRow(turn.id) }
-                            )
+                            if turn.kind == .sessionBreak {
+                                SessionBreakRow(notice: turn.question)
+                            } else {
+                                CollapsedTurnRow(
+                                    turn: turn,
+                                    isExpanded: session.expandedTurnIDs.contains(turn.id),
+                                    onToggle: { session.toggleExpandedRow(turn.id) }
+                                )
+                            }
                         }
                         if !priorTurns.isEmpty {
                             Divider().overlay(Theme.hairline)
@@ -542,6 +546,10 @@ struct ExpandedHUD: View {
                 onPasteImages: { session.attachFromPasteboard() },
                 onFocusChange: { fieldFocused = $0 }
             )
+            .onChange(of: session.prompt) { _, _ in
+                // Typing is presence: the idle clock restarts.
+                session.touchPresence()
+            }
             .fixedSize(horizontal: false, vertical: true)
             .frame(minHeight: Theme.fieldMinHeight, maxHeight: Theme.fieldMaxHeight)
             .contentShape(Rectangle())
@@ -765,6 +773,28 @@ struct ExpandedHUD: View {
             }
         }
         return accepted
+    }
+}
+
+/// A context break in the transcript: the idle-expired session was replaced
+/// by a fresh one, so history above this line is no longer in the engine's
+/// context. Muted divider idiom — hairlines flanking an 11 pt mute label.
+struct SessionBreakRow: View {
+    let notice: String
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Rectangle().fill(Theme.hairline).frame(height: 1)
+            Text(notice)
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.mute)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .help(notice)
+            Rectangle().fill(Theme.hairline).frame(height: 1)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(notice)
     }
 }
 

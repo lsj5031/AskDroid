@@ -14,6 +14,16 @@ struct Turn: Identifiable, Equatable {
         case interrupted
     }
 
+    /// What a transcript entry represents.
+    enum Kind: Equatable {
+        /// A real question-and-answer round.
+        case turn
+        /// A muted divider marking a context break — e.g. the idle-expired
+        /// session was replaced by a fresh one, so history above this line
+        /// is no longer in the engine's context.
+        case sessionBreak
+    }
+
     let id: UUID
     var question: String
     var images: [AttachedImage]
@@ -25,6 +35,7 @@ struct Turn: Identifiable, Equatable {
     var durationText: String?
     var tokenSummary: String?
     var archiveURL: URL?
+    var kind: Kind = .turn
 }
 
 /// Context-window fill reported by the engine, for footer meta.
@@ -115,8 +126,23 @@ final class AskSession: ObservableObject {
     static let maxImageBytes = 5 * 1024 * 1024
     static let maxTotalImageBytes = 15 * 1024 * 1024
     /// How long an open CLI session may sit unused before it is closed.
-    /// The session id stays in memory so a follow-up plan can reattach.
-    static let idleSessionTimeout: TimeInterval = 10 * 60
+    /// The session id stays in memory so a follow-up plan can reattach —
+    /// but Pi runs `--no-session`, so an idle close always means the next
+    /// turn starts from zero. Long enough that closing only happens while
+    /// the operator is truly away.
+    static let idleSessionTimeout: TimeInterval = 60 * 60
+    /// Instance override so tests can exercise expiry without waiting the
+    /// real timeout. Production reads the constant.
+    var idleSessionTimeoutOverride: TimeInterval?
+    private var effectiveIdleSessionTimeout: TimeInterval {
+        idleSessionTimeoutOverride ?? Self.idleSessionTimeout
+    }
+    /// Set when the idle timer replaced a live session: the next turn runs
+    /// on a brand-new session, and the transcript says so instead of
+    /// pretending continuity.
+    private var needsFreshSessionNotice = false
+    /// Transcript text for that context break.
+    static let sessionBreakNotice = "Previous session expired — starting fresh"
 
     let droidEngine: DroidEngine
     let piEngine: PiEngine
@@ -213,6 +239,7 @@ final class AskSession: ObservableObject {
         if phase == .idle {
             phase = .composing
         }
+        touchPresence()
         NotificationCenter.default.post(name: .askDroidFocusInput, object: nil)
     }
 
@@ -258,6 +285,27 @@ final class AskSession: ObservableObject {
         let turnID = UUID()
         if conversationStartedAt == nil {
             conversationStartedAt = Date()
+        }
+        // An idle-expired session was replaced by a fresh one: say so
+        // instead of letting the new answer masquerade as continuity.
+        if needsFreshSessionNotice {
+            needsFreshSessionNotice = false
+            if !transcript.isEmpty {
+                transcript.append(Turn(
+                    id: UUID(),
+                    question: Self.sessionBreakNotice,
+                    images: [],
+                    answer: "",
+                    thinking: "",
+                    log: [],
+                    status: .completed,
+                    errorMessage: nil,
+                    durationText: nil,
+                    tokenSummary: nil,
+                    archiveURL: nil,
+                    kind: .sessionBreak
+                ))
+            }
         }
         let request = EngineRequest(
             prompt: prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -499,6 +547,10 @@ final class AskSession: ObservableObject {
         guard let handle = activeHandle else { return }
         activeHandle = nil
         retainedSessionID = await handle.state?.sessionID
+        // The next turn relaunches a fresh CLI with zero prior context (Pi
+        // runs --no-session, so there is nothing to reattach to). Flag it
+        // so the transcript says so.
+        needsFreshSessionNotice = true
         AskLog.line("closing idle session id=\(retainedSessionID ?? "none")")
         let client = self.engine
         Task { [client] in
@@ -510,10 +562,23 @@ final class AskSession: ObservableObject {
         idleTimer?.cancel()
         guard activeHandle != nil else { return }
         idleTimer = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(Self.idleSessionTimeout))
+            try? await Task.sleep(for: .seconds(self?.effectiveIdleSessionTimeout ?? Self.idleSessionTimeout))
             guard !Task.isCancelled else { return }
             await self?.closeIdleSession()
         }
+    }
+
+    /// User presence: panel summon/open, typing in the composer, submit.
+    /// Closing an idle session only makes sense while the operator is truly
+    /// away, so any of these restarts the clock.
+    func touchPresence() {
+        touchSessionActivity()
+    }
+
+    /// Test seam: fires the idle timer now instead of waiting the real
+    /// timeout.
+    func expireIdleSessionForTesting() async {
+        await closeIdleSession()
     }
 
     // MARK: Attachments
@@ -777,7 +842,7 @@ final class AskSession: ObservableObject {
     /// One file per conversation: the first write resolves the base name
     /// (title-derived when the session has one), later writes reuse it.
     private func archiveConversation() {
-        let completed = transcript.filter { $0.status == .completed }
+        let completed = transcript.filter { $0.status == .completed && $0.kind == .turn }
         guard !completed.isEmpty else { return }
         do {
             let archived = try AnswerArchive.write(
@@ -798,7 +863,8 @@ final class AskSession: ObservableObject {
             )
             conversationArchiveBase = archived.baseName
             // Every completed turn points at the same living file.
-            for turn in transcript where turn.status == .completed && turn.archiveURL != archived.markdownURL {
+            for turn in transcript
+            where turn.kind == .turn && turn.status == .completed && turn.archiveURL != archived.markdownURL {
                 mutateTurn(turn.id) { $0.archiveURL = archived.markdownURL }
             }
             archiveError = nil

@@ -2182,6 +2182,96 @@ final class AskSessionTests: XCTestCase {
         XCTAssertTrue(sawName, "set_session_name never sent")
         XCTAssertTrue(process.written.joined().contains(#""name":"explain the visitor pattern please""#))
     }
+
+    // MARK: Idle session expiry (operator fix batch)
+
+    func testIdleSessionTimeoutIsSixtyMinutes() {
+        XCTAssertEqual(AskSession.idleSessionTimeout, 60 * 60)
+    }
+
+    func testPresenceKeepsIdleSessionAlive() async {
+        let launcher = MockLauncher()
+        let session = makeSession(launcher: launcher)
+        session.idleSessionTimeoutOverride = 0.4
+        session.isExpanded = true
+        session.prompt = "first"
+        session.submit()
+
+        _ = await waitFor { launcher.count >= 1 }
+        let process = launcher.processes[0]
+        feedDroidInit(process)
+        _ = await waitForWritten(process, contains: "add_user_message")
+        feedDroidTurn(process, delta: "done")
+        _ = await waitForSession { session.transcript.first?.status == .completed }
+
+        // Simulate an operator around for well over the timeout window:
+        // typing (the view forwards prompt changes as presence) and a
+        // panel summon. Without resets the session would close at 0.4 s.
+        for _ in 0..<8 {
+            session.prompt = "typing \(UUID().uuidString)"
+            session.touchPresence()
+            if process.terminated { break }
+            try? await Task.sleep(for: .milliseconds(100))
+            XCTAssertFalse(process.terminated, "presence did not reset the idle clock")
+        }
+        session.present()
+        XCTAssertFalse(process.terminated, "summoning the panel killed the session")
+
+        // Once presence stops, expiry closes the session.
+        try? await Task.sleep(for: .milliseconds(700))
+        let closed = await waitForSession { process.terminated }
+        XCTAssertTrue(closed, "idle session was never closed after presence stopped")
+    }
+
+    func testIdleExpiryInsertsFreshSessionMarkerAndNextTurnCompletes() async {
+        let launcher = MockLauncher()
+        let session = makeSession(launcher: launcher)
+        session.isExpanded = true
+        session.prompt = "what is a pelican?"
+        session.submit()
+
+        _ = await waitFor { launcher.count >= 1 }
+        let process = launcher.processes[0]
+        feedDroidInit(process)
+        _ = await waitForWritten(process, contains: "add_user_message")
+        feedDroidTurn(process, delta: "a big bird")
+        _ = await waitForSession { session.transcript.first?.status == .completed }
+        _ = await waitForSession { session.archiveURL != nil }
+
+        // The idle timer fires.
+        await session.expireIdleSessionForTesting()
+        let closed = await waitForSession { process.terminated }
+        XCTAssertTrue(closed, "expired session was not closed")
+
+        // The follow-up starts fresh: the marker row comes first, then the
+        // turn — no pretended continuity.
+        session.prompt = "and its wingspan?"
+        session.submit()
+        XCTAssertEqual(session.transcript.count, 3)
+        XCTAssertEqual(session.transcript[1].kind, .sessionBreak)
+        XCTAssertEqual(session.transcript[1].question, AskSession.sessionBreakNotice)
+        XCTAssertEqual(session.transcript[2].question, "and its wingspan?")
+        XCTAssertEqual(session.transcript[2].status, .running)
+
+        // A brand-new CLI serves the follow-up.
+        let freshLaunched = await waitForSession { launcher.count >= 2 }
+        XCTAssertTrue(freshLaunched, "follow-up did not relaunch after idle expiry")
+        let fresh = launcher.processes[1]
+        feedDroidInit(fresh)
+        _ = await waitForWritten(fresh, contains: "add_user_message")
+        feedDroidTurn(fresh, delta: "about three metres")
+        _ = await waitForSession { session.transcript[2].status == .completed }
+        XCTAssertEqual(session.transcript[2].answer, "about three metres")
+
+        // The archive records real turns only — the marker stays out.
+        _ = await waitForSession { session.archiveURL != nil }
+        let body = (try? String(contentsOf: session.archiveURL!, encoding: .utf8)) ?? ""
+        XCTAssertTrue(body.contains("## Turn 1"))
+        XCTAssertTrue(body.contains("what is a pelican?"))
+        XCTAssertTrue(body.contains("## Turn 2"))
+        XCTAssertTrue(body.contains("about three metres"))
+        XCTAssertFalse(body.contains(AskSession.sessionBreakNotice), "marker leaked into the archive")
+    }
 }
 
 final class SettingsStoreTests: XCTestCase {
