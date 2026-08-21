@@ -1797,7 +1797,11 @@ final class AskSessionTests: XCTestCase {
         XCTAssertEqual(session.transcript[1].answer, "fixed")
     }
 
-    // MARK: Steering (plan 008 Phase 7)
+    // MARK: Steering and queueing (plan 008 Phase 7 + fix batch)
+
+    private func pendingTexts(_ session: AskSession) -> [String] {
+        session.pending.map(\.text)
+    }
 
     func testSteeredMessageQueuesWhileTurnIsRunning() async {
         // Pi steers on the wire: the steered prompt must carry
@@ -1814,36 +1818,212 @@ final class AskSessionTests: XCTestCase {
         process.feedStdout(#"{"id":"1","type":"response","command":"prompt","success":true}"#)
         _ = await waitForSession { session.phase == .running && session.transcript[0].status == .running }
 
-        // Type while the turn streams: no new transcript turn, message pends.
+        // Type while the turn streams: no new transcript turn, message pends
+        // as steering (the engine default on a wire-steering engine).
         session.prompt = "actually focus on the error path"
         session.submit()
         XCTAssertEqual(session.transcript.count, 1, "steering must not append a turn")
         XCTAssertTrue(session.prompt.isEmpty, "composer should empty once queued")
-        XCTAssertEqual(session.pendingMessages, ["actually focus on the error path"])
+        XCTAssertEqual(pendingTexts(session), ["actually focus on the error path"])
+        XCTAssertEqual(session.pending.first?.mode, .steering)
 
         let sawSteer = await waitForWritten(process, contains: #""streamingBehavior":"steer""#)
         XCTAssertTrue(sawSteer, "steered prompt was never sent with streamingBehavior")
         let promptsBeforeSettle = writtenCount(process, containing: #""type":"prompt""#)
         XCTAssertEqual(promptsBeforeSettle, 2, "steering must ride the live session, not a new turn")
 
-        // Pi's queue_update is the authoritative pending list.
+        // Pi's queue_update is the authoritative steered list.
         session.handle(.queueChanged(["actually focus on the error path", "and also add tests"]))
-        XCTAssertEqual(session.pendingMessages, ["actually focus on the error path", "and also add tests"])
+        XCTAssertEqual(pendingTexts(session), ["actually focus on the error path", "and also add tests"])
+        XCTAssertTrue(session.pending.allSatisfy { $0.mode == .steering })
 
-        // Settling delivers steered input into the finished turn; the
-        // pending mirror clears and no follow-up turn auto-sends.
+        // Settling delivers steered input into the finished turn; leftover
+        // steered chips clear and no follow-up turn auto-sends.
         process.feedStdout(#"{"type":"agent_settled"}"#)
         _ = await waitForSession { session.transcript[0].status == .completed }
-        _ = await waitForSession { session.pendingMessages.isEmpty }
+        _ = await waitForSession { session.pending.isEmpty }
         XCTAssertEqual(session.transcript.count, 1)
         let promptsAfterSettle = writtenCount(process, containing: #""type":"prompt""#)
         XCTAssertEqual(promptsAfterSettle, 2, "settle must not re-send steered messages")
     }
 
+    func testExplicitQueueIntentHoldsOnWireEngine() async {
+        // On Pi the operator can choose Queue instead of Steer: the message
+        // must NOT touch the wire mid-turn; it auto-sends as the next turn.
+        let launcher = MockLauncher()
+        let session = makeSession(launcher: launcher, engine: .pi)
+        session.isExpanded = true
+        session.prompt = "long running question"
+        session.submit()
+
+        _ = await waitFor { launcher.count >= 1 }
+        let process = launcher.processes[0]
+        _ = await waitForWritten(process, contains: #""type":"prompt""#)
+        process.feedStdout(#"{"id":"1","type":"response","command":"prompt","success":true}"#)
+        _ = await waitForSession { session.phase == .running }
+
+        session.prompt = "hold this for later"
+        session.submit(.queue)
+        XCTAssertEqual(session.transcript.count, 1)
+        XCTAssertEqual(pendingTexts(session), ["hold this for later"])
+        XCTAssertEqual(session.pending.first?.mode, .queued)
+
+        let sawHold = await waitForWritten(process, contains: "hold this for later")
+        XCTAssertFalse(sawHold, "queued intent leaked to the wire mid-turn")
+        XCTAssertFalse(
+            process.written.joined().contains(#""streamingBehavior""#),
+            "queued intent must not steer"
+        )
+
+        // Settle drains the held message as a proper next turn.
+        process.feedStdout(#"{"type":"agent_settled"}"#)
+        let sawSecondPrompt = await waitForSession { writtenCount(process, containing: #""type":"prompt""#) >= 2 }
+        XCTAssertTrue(sawSecondPrompt, "queued message never auto-sent")
+        XCTAssertTrue(session.pending.isEmpty, "queued chip clears when its turn starts")
+        XCTAssertEqual(session.transcript.count, 2)
+        XCTAssertEqual(session.transcript[1].question, "hold this for later")
+        XCTAssertEqual(session.transcript[1].status, .running)
+        process.feedStdout(#"{"id":"2","type":"response","command":"prompt","success":true}"#)
+        process.feedStdout(#"{"type":"agent_settled"}"#)
+        _ = await waitForSession { session.transcript[1].status == .completed }
+    }
+
+    func testDroidSteerIntentFallsBackToClientQueue() async {
+        // Steering is probed-unsafe on droid and never offered; an explicit
+        // .steer intent must defensively fall back to the client-side queue.
+        let launcher = MockLauncher()
+        let session = makeSession(launcher: launcher)
+        session.isExpanded = true
+        session.prompt = "long running question"
+        session.submit()
+
+        _ = await waitFor { launcher.count >= 1 }
+        let process = launcher.processes[0]
+        feedDroidInit(process)
+        _ = await waitForWritten(process, contains: "add_user_message")
+
+        session.prompt = "pivot the search"
+        session.submit(.steer)
+        XCTAssertEqual(session.transcript.count, 1)
+        XCTAssertEqual(pendingTexts(session), ["pivot the search"])
+        XCTAssertEqual(session.pending.first?.mode, .queued, "droid steer must fall back to client-queue")
+        XCTAssertFalse(
+            process.written.joined().contains("pivot the search"),
+            "droid steer fallback must not write mid-turn bytes"
+        )
+
+        feedDroidTurn(process, delta: "answer one")
+        let sawSecondMessage = await waitForSession { writtenCount(process, containing: "add_user_message") >= 2 }
+        XCTAssertTrue(sawSecondMessage, "fallback-queued message never auto-sent")
+        XCTAssertEqual(session.transcript.last?.question, "pivot the search")
+        feedDroidTurn(process, delta: "answer two")
+        _ = await waitForSession { session.transcript[1].status == .completed }
+        XCTAssertEqual(launcher.count, 1)
+    }
+
+    func testSteeredChipClearsOnAckAndQueuedSurvives() async {
+        // Delivery confirmation: the ack clears the steered chip while the
+        // turn is still streaming; queued entries are untouched. Without an
+        // ack, settle is the fallback cleanup.
+        let launcher = MockLauncher()
+        let session = makeSession(launcher: launcher, engine: .pi)
+        session.isExpanded = true
+        session.prompt = "long running question"
+        session.submit()
+
+        _ = await waitFor { launcher.count >= 1 }
+        let process = launcher.processes[0]
+        _ = await waitForWritten(process, contains: #""type":"prompt""#)
+        process.feedStdout(#"{"id":"1","type":"response","command":"prompt","success":true}"#)
+        _ = await waitForSession { session.phase == .running }
+
+        // One of each mode.
+        session.prompt = "hold this"
+        session.submit(.queue)
+        session.prompt = "inject this"
+        session.submit(.steer)
+        XCTAssertEqual(pendingTexts(session), ["hold this", "inject this"])
+        XCTAssertEqual(session.pending.map(\.mode), [.queued, .steering])
+
+        // The steer must actually be on the wire (and its request id
+        // registered) before an ack can exist.
+        let sawSteer = await waitForWritten(process, contains: "inject this")
+        XCTAssertTrue(sawSteer)
+
+        // The wire queue mirrors only the steered entry; reconciliation
+        // groups steered entries ahead of queued ones. The queued entry
+        // survives.
+        session.handle(.queueChanged(["inject this"]))
+        XCTAssertEqual(pendingTexts(session), ["inject this", "hold this"])
+        XCTAssertEqual(session.pending.map(\.mode), [.steering, .queued])
+
+        // Ack arrives while still streaming: steered chip clears.
+        process.feedStdout(#"{"id":"2","type":"response","command":"prompt","success":true}"#)
+        let ackCleared = await waitForSession {
+            session.pending.count == 1 && session.pending.first?.mode == .queued
+        }
+        XCTAssertTrue(ackCleared, "ack did not clear the steered chip")
+        XCTAssertEqual(pendingTexts(session), ["hold this"])
+
+        // Settle: no steered leftovers; the queued message auto-sends.
+        process.feedStdout(#"{"type":"agent_settled"}"#)
+        // Wait for the settlement chain (complete -> drain -> new turn)
+        // rather than for wire bytes alone, so the asserts below read a
+        // settled state instead of racing it.
+        let settledAndDrained = await waitForSession {
+            session.transcript.count == 2 && session.pending.isEmpty
+        }
+        XCTAssertTrue(settledAndDrained, "settle did not drain the queued message")
+        let drained = await waitForSession { writtenCount(process, containing: #""type":"prompt""#) >= 2 }
+        XCTAssertTrue(drained)
+        XCTAssertTrue(session.pending.isEmpty)
+        XCTAssertEqual(session.transcript.count, 2)
+        XCTAssertEqual(session.transcript[1].question, "hold this")
+    }
+
+    func testDrainsOneQueuedMessagePerSettle() async {
+        let launcher = MockLauncher()
+        let session = makeSession(launcher: launcher)
+        session.isExpanded = true
+        session.prompt = "long running question"
+        session.submit()
+
+        _ = await waitFor { launcher.count >= 1 }
+        let process = launcher.processes[0]
+        feedDroidInit(process)
+        _ = await waitForWritten(process, contains: "add_user_message")
+
+        session.prompt = "first follow-up"
+        session.submit(.queue)
+        session.prompt = "second follow-up"
+        session.submit(.queue)
+        XCTAssertEqual(pendingTexts(session), ["first follow-up", "second follow-up"])
+
+        // Turn 1 settles: exactly ONE queued message becomes turn 2.
+        feedDroidTurn(process, delta: "answer one")
+        let sawSecond = await waitForSession { writtenCount(process, containing: "add_user_message") >= 2 }
+        XCTAssertTrue(sawSecond)
+        XCTAssertEqual(session.transcript.count, 2)
+        XCTAssertEqual(session.transcript[1].question, "first follow-up")
+        XCTAssertEqual(pendingTexts(session), ["second follow-up"], "drain must be one per settle")
+
+        // Turn 2 settles: the last one becomes turn 3.
+        feedDroidTurn(process, delta: "answer two")
+        let sawThird = await waitForSession { writtenCount(process, containing: "add_user_message") >= 3 }
+        XCTAssertTrue(sawThird)
+        XCTAssertEqual(session.transcript.count, 3)
+        XCTAssertEqual(session.transcript[2].question, "second follow-up")
+        XCTAssertTrue(session.pending.isEmpty)
+
+        feedDroidTurn(process, delta: "answer three")
+        _ = await waitForSession { session.transcript[2].status == .completed }
+        XCTAssertEqual(launcher.count, 1, "chained drains relaunched the CLI")
+    }
+
     func testDroidSubmitWhileRunningPendsAndAutoSendsAsNextTurn() async {
         // Droid has no usable wire-steer path (its queued messages run as an
-        // unreachable engine-initiated turn), so the session holds the
-        // message and sends it through the normal pipeline on settle.
+        // unreachable engine-initiated turn), so the default intent holds
+        // the message and sends it through the normal pipeline on settle.
         let launcher = MockLauncher()
         let session = makeSession(launcher: launcher)
         session.isExpanded = true
@@ -1859,7 +2039,8 @@ final class AskSessionTests: XCTestCase {
         session.submit()
         XCTAssertEqual(session.transcript.count, 1, "steering must not append a turn")
         XCTAssertTrue(session.prompt.isEmpty)
-        XCTAssertEqual(session.pendingMessages, ["what did you find?"])
+        XCTAssertEqual(pendingTexts(session), ["what did you find?"])
+        XCTAssertEqual(session.pending.first?.mode, .queued)
         XCTAssertFalse(
             process.written.joined().contains("what did you find?"),
             "droid steering must not write mid-turn bytes the engine cannot answer"
@@ -1877,7 +2058,7 @@ final class AskSessionTests: XCTestCase {
         feedDroidTurn(process, delta: "answer two")
         _ = await waitForSession { session.transcript[1].status == .completed }
         XCTAssertEqual(session.transcript[1].answer, "answer two")
-        XCTAssertTrue(session.pendingMessages.isEmpty)
+        XCTAssertTrue(session.pending.isEmpty)
         XCTAssertEqual(launcher.count, 1, "auto-send relaunched the CLI")
     }
 
@@ -1894,8 +2075,8 @@ final class AskSessionTests: XCTestCase {
         _ = await waitForWritten(process, contains: "add_user_message")
 
         session.prompt = "follow-up anyway"
-        session.submit()
-        XCTAssertEqual(session.pendingMessages, ["follow-up anyway"])
+        session.submit(.queue)
+        XCTAssertEqual(pendingTexts(session), ["follow-up anyway"])
 
         // The interrupt stops the turn, not the queued intent: settling the
         // interrupted turn auto-sends the pending message as the next one.
@@ -1908,7 +2089,7 @@ final class AskSessionTests: XCTestCase {
         XCTAssertTrue(sawSecondMessage)
         feedDroidTurn(process, delta: "done anyway")
         _ = await waitForSession { session.transcript[1].status == .completed }
-        XCTAssertTrue(session.pendingMessages.isEmpty)
+        XCTAssertTrue(session.pending.isEmpty)
     }
 
     // MARK: Conversation archive and session title (plan 008 Phase 8)

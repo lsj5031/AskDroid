@@ -225,6 +225,9 @@ actor PiEngine: EngineClient {
             if steerAck {
                 if json["success"] as? Bool == true {
                     onEvent(.log(turnID, "steer accepted"))
+                    // Delivery confirmation: the session clears the steered
+                    // chip on this, falling back to settle-time cleanup.
+                    onEvent(.steerAccepted)
                 } else {
                     let error = (json["error"] as? String) ?? (json["message"] as? String) ?? "Pi rejected the steered message."
                     onEvent(.log(turnID, error))

@@ -51,6 +51,23 @@ struct ContextStats: Equatable {
     }
 }
 
+/// One message typed while a turn streams, waiting to land.
+struct PendingMessage: Identifiable, Equatable {
+    /// How the message will be delivered.
+    enum Mode: Equatable {
+        /// Injected into the live turn on the wire; the chip clears when the
+        /// engine acks (or at settle if no ack ever comes).
+        case steering
+        /// Held client-side; auto-sends as the next turn when the current
+        /// one settles.
+        case queued
+    }
+
+    let id: UUID
+    var text: String
+    var mode: Mode
+}
+
 @MainActor
 final class AskSession: ObservableObject {
     enum Phase: Equatable {
@@ -73,10 +90,10 @@ final class AskSession: ObservableObject {
     /// view) so the panel's reposition sinks can track it.
     @Published var expandedTurnIDs: Set<UUID> = []
     @Published var contextStats: ContextStats?
-    /// Messages typed while a turn is streaming. Wire-steering engines
-    /// mirror their remote queue here; other engines hold the message until
-    /// the running turn settles and it auto-sends as the next one.
-    @Published var pendingMessages: [String] = []
+    /// Messages typed while a turn is streaming, each with its delivery
+    /// mode. Steered entries mirror the engine's wire queue; queued entries
+    /// are held client-side and auto-send as the next turn.
+    @Published var pending: [PendingMessage] = []
     /// The session's display name (droid's `session_title_updated`, or a
     /// local derivation pushed to Pi via `set_session_name`). Drives the HUD
     /// header and the archive filename.
@@ -218,12 +235,24 @@ final class AskSession: ObservableObject {
 
     // MARK: Conversation lifecycle
 
-    /// Sends a follow-up turn, or steers the running one. Prior turns stay
-    /// in the transcript; only the composer empties.
-    func submit() {
+    /// How input typed while a turn streams should be delivered.
+    enum DeliveryIntent {
+        /// Inject into the live turn on the wire (wire-steering engines).
+        case steer
+        /// Hold visibly; auto-send as the next turn when the current one
+        /// settles (any engine).
+        case queue
+    }
+
+    /// Sends a follow-up turn, or handles input while a turn streams. Prior
+    /// turns stay in the transcript; only the composer empties. While
+    /// running, a nil intent means the engine default (steer on
+    /// wire-steering engines, queue elsewhere); ⌘↩ and the primary button
+    /// both land here.
+    func submit(_ intent: DeliveryIntent? = nil) {
         guard canSubmit else { return }
         if phase == .running {
-            steerRunningTurn()
+            deliverWhileRunning(intent ?? defaultDeliveryIntent)
             return
         }
         let turnID = UUID()
@@ -279,10 +308,18 @@ final class AskSession: ObservableObject {
         }
     }
 
-    /// Delivers input into the turn that is currently streaming (plan 008
-    /// Phase 7). Wire-steering engines inject it immediately; the rest hold
-    /// it client-side and auto-send it as the next turn on settle.
-    private func steerRunningTurn() {
+    /// The action the primary composer button takes while a turn streams.
+    private var defaultDeliveryIntent: DeliveryIntent {
+        engine.steersOnWire ? .steer : .queue
+    }
+
+    /// Delivers input into the turn that is currently streaming. `.steer`
+    /// injects on the wire where the engine supports it (droid never does:
+    /// its mid-turn queue auto-executes as an engine-initiated turn whose
+    /// output the handle can never settle, so it falls back to the
+    /// client-side queue). `.queue` holds the message visibly on any engine
+    /// and auto-sends it as the next turn.
+    private func deliverWhileRunning(_ intent: DeliveryIntent) {
         let request = EngineRequest(
             prompt: prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 ? "Look at the attached image(s)."
@@ -291,11 +328,16 @@ final class AskSession: ObservableObject {
             settings: settings
         )
         guard let handle = activeHandle else { return }
-        pendingMessages.append(request.prompt)
+        let client = self.engine
+        let wireSteer = intent == .steer && client.steersOnWire
+        pending.append(PendingMessage(
+            id: UUID(),
+            text: request.prompt,
+            mode: wireSteer ? .steering : .queued
+        ))
         prompt = ""
         images = []
-        let client = self.engine
-        guard client.steersOnWire else { return }
+        guard wireSteer else { return }
         Task { [client, weak self] in
             do {
                 try await client.queue(request, to: handle)
@@ -303,7 +345,9 @@ final class AskSession: ObservableObject {
                 await MainActor.run { [weak self] in
                     guard let self else { return }
                     // Nothing was delivered; give the message back.
-                    pendingMessages.removeAll { $0 == request.prompt }
+                    if let index = pending.firstIndex(where: { $0.text == request.prompt && $0.mode == .steering }) {
+                        pending.remove(at: index)
+                    }
                     prompt = prompt.isEmpty ? request.prompt : prompt + "\n" + request.prompt
                     notice = error.localizedDescription
                 }
@@ -311,18 +355,36 @@ final class AskSession: ObservableObject {
         }
     }
 
-    /// Runs when a turn settles. Wire-steered messages were already delivered
-    /// by the engine, so the pending mirror clears; client-side queued
-    /// messages auto-send as the next turn.
+    /// Runs when a turn settles. Steered leftovers stop promising delivery
+    /// (no ack came); one queued message auto-sends as the next turn —
+    /// later ones drain at each subsequent settle.
     private func settlePendingQueue() {
-        if engine.steersOnWire {
-            pendingMessages = []
-            return
-        }
-        guard !pendingMessages.isEmpty else { return }
-        let next = pendingMessages.removeFirst()
-        prompt = next
+        pending.removeAll { $0.mode == .steering }
+        guard let next = pending.first(where: { $0.mode == .queued }) else { return }
+        pending.removeAll { $0.id == next.id }
+        prompt = next.text
         submit()
+    }
+
+    /// Reconciles the steered entries with the engine's authoritative wire
+    /// queue. Client-queued entries are invisible to the engine and survive;
+    /// steered texts keep their identity across updates so chips don't
+    /// flicker.
+    private func reconcileSteering(with messages: [String]) {
+        var steered: [PendingMessage] = []
+        var claimed = Set<UUID>()
+        for text in messages {
+            if let existing = pending.first(where: {
+                $0.mode == .steering && $0.text == text && !claimed.contains($0.id)
+            }) {
+                claimed.insert(existing.id)
+                steered.append(existing)
+            } else {
+                steered.append(PendingMessage(id: UUID(), text: text, mode: .steering))
+            }
+        }
+        let queued = pending.filter { $0.mode == .queued }
+        pending = steered + queued
     }
 
     /// Stops the running turn without ending the conversation. The composer
@@ -566,13 +628,20 @@ final class AskSession: ObservableObject {
         case .contextStats(let used, let limit):
             contextStats = ContextStats(used: used, limit: limit)
         case .queueChanged(let messages):
-            // Authoritative while a turn streams (Pi's queue_update). A
-            // delivery after settle is stale — the pending mirror cleared
-            // when the turn ended.
+            // Authoritative mirror of the engine's wire queue while a turn
+            // streams. Steered entries reconcile; client-queued entries are
+            // invisible to the engine and survive. A delivery after settle
+            // is stale — steered entries cleared when the turn ended.
             if phase == .running {
-                pendingMessages = messages
+                reconcileSteering(with: messages)
             } else {
-                pendingMessages = []
+                pending.removeAll { $0.mode == .steering }
+            }
+        case .steerAccepted:
+            // The engine confirmed injection into the live turn: the chip's
+            // job is done. First-in is first delivered (Pi drains FIFO).
+            if let index = pending.firstIndex(where: { $0.mode == .steering }) {
+                pending.remove(at: index)
             }
         case .sessionTitle(let title):
             // Droid names sessions itself; its title wins over any local
@@ -805,7 +874,7 @@ final class AskSession: ObservableObject {
         copied = false
         notice = nil
         contextStats = nil
-        pendingMessages = []
+        pending = []
         expandedTurnIDs = []
         sessionTitle = nil
         conversationArchiveBase = nil

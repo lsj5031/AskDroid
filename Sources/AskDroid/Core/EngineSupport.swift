@@ -154,6 +154,8 @@ enum EngineEvent: Sendable {
     case contextStats(used: Int, limit: Int)
     /// Steering queue changes (plan 008 Phase 7).
     case queueChanged([String])
+    /// The engine accepted a steered prompt: it is now in the live turn.
+    case steerAccepted
     /// The engine named the session (droid's `session_title_updated`).
     case sessionTitle(String)
     /// The CLI process is gone. `nil` reason means we closed it ourselves.

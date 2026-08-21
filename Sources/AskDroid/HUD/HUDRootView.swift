@@ -538,7 +538,7 @@ struct ExpandedHUD: View {
             PromptEditor(
                 text: $session.prompt,
                 placeholder: composerPlaceholder,
-                onSubmit: session.submit,
+                onSubmit: { session.submit() },
                 onPasteImages: { session.attachFromPasteboard() },
                 onFocusChange: { fieldFocused = $0 }
             )
@@ -553,26 +553,26 @@ struct ExpandedHUD: View {
                     .stroke(fieldFocused ? Theme.accent.opacity(0.85) : Theme.hairline, lineWidth: 1)
             }
 
-            if !session.pendingMessages.isEmpty {
+            if !session.pending.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Queued")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(Theme.mute)
-                    ForEach(Array(session.pendingMessages.enumerated()), id: \.offset) { _, message in
+                    ForEach(session.pending) { entry in
                         HStack(alignment: .firstTextBaseline, spacing: 6) {
-                            Image(systemName: "clock")
-                                .font(.system(size: 9, weight: .bold))
-                                .foregroundStyle(Theme.accent)
-                            Text(message)
+                            Text(entry.mode == .steering ? "Steering…" : "Queued · after this turn")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(entry.mode == .steering ? Theme.accent : Theme.mute)
+                            Text(entry.text)
                                 .font(.system(size: 12))
                                 .foregroundStyle(Theme.mute)
                                 .lineLimit(1)
                                 .truncationMode(.tail)
                         }
+                        .help(entry.mode == .steering
+                              ? "Injected into the turn in progress"
+                              : "Sends automatically when the current turn finishes")
                     }
                 }
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel("Queued messages: \(session.pendingMessages.joined(separator: ", "))")
+                .accessibilityLabel("Pending messages: \(session.pending.map(\.text).joined(separator: ", "))")
             }
 
             if let notice = session.notice {
@@ -590,20 +590,48 @@ struct ExpandedHUD: View {
                 .labelStyle(.titleAndIcon)
                 .animation(.easeOut(duration: 0.12), value: isDropTargeted)
                 Spacer()
-                Button(session.phase == .running ? "Queue" : "Ask", action: session.submit)
+                if session.phase == .running, session.engine.steersOnWire {
+                    Button("Queue") { session.submit(.queue) }
+                        .buttonStyle(GhostButtonStyle())
+                        .help("Hold this and send it as the next turn")
+                }
+                Button(primarySendLabel) { session.submit() }
                     .buttonStyle(PrimaryButtonStyle())
                     .disabled(!session.canSubmit)
                     .keyboardShortcut(.return, modifiers: .command)
-                    .help(session.phase == .running ? "Send while the current turn is working" : "Send")
+                    .help(primarySendHelp)
             }
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 16)
     }
 
+    /// The primary composer action: "Ask" when idle, otherwise the engine
+    /// default for input typed mid-turn (steer on wire-steering engines,
+    /// queue elsewhere). ⌘↩ triggers this.
+    private var primarySendLabel: String {
+        switch session.phase {
+        case .running:
+            session.engine.steersOnWire ? "Steer" : "Queue"
+        default:
+            "Ask"
+        }
+    }
+
+    private var primarySendHelp: String {
+        switch session.phase {
+        case .running:
+            session.engine.steersOnWire
+                ? "Inject into the turn in progress"
+                : "Hold this and send it as the next turn"
+        default:
+            "Send"
+        }
+    }
+
     private var composerPlaceholder: String {
         if session.phase == .running {
-            return "Steer while \(session.settings.engine.title) works…"
+            return "Message \(session.settings.engine.title) while it works…"
         }
         return session.images.isEmpty ? "Ask \(session.settings.engine.title) anything" : "Add a note, or just send the image"
     }
