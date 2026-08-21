@@ -79,6 +79,12 @@ actor PiEngine: EngineClient {
                 onEvent(.log(turn.turnID, "prompt sent"))
                 onEvent(.activity(turn.turnID, "Waiting for Pi…"))
             },
+            turnDidEnd: { process, _ in
+                // Footer meta: ask for context fill after every settled turn.
+                if let line = try? Self.encodeJSON(["type": "get_session_stats"]) {
+                    try? process.write(line)
+                }
+            },
             onTurnEnd: { _, _ in
                 // Engine-side bookkeeping (context stats) rides the runner's
                 // turnDidEnd hook.
@@ -188,7 +194,18 @@ actor PiEngine: EngineClient {
            command != "prompt"
         {
             switch command {
-            case "get_session_stats", "new_session", "abort":
+            case "get_session_stats":
+                // Per spec, contextUsage can be absent and its fields can be
+                // null right after compaction — emit only when both fill in.
+                if let data = json["data"] as? [String: Any],
+                   let usage = data["contextUsage"] as? [String: Any],
+                   let tokens = Self.statValue(usage["tokens"]),
+                   let window = Self.statValue(usage["contextWindow"])
+                {
+                    onEvent(.contextStats(used: tokens, limit: window))
+                }
+                return
+            case "new_session", "abort":
                 return
             default:
                 break // unknown commands fall through to the logged-failure path
@@ -447,5 +464,9 @@ actor PiEngine: EngineClient {
         if let number = value as? Int { return number }
         if let number = value as? Double { return Int(number) }
         return nil
+    }
+
+    private static func statValue(_ value: Any?) -> Int? {
+        intValue(value)
     }
 }

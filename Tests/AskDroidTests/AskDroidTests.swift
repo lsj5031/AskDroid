@@ -1663,4 +1663,155 @@ final class PiEngineStateMachineTests: XCTestCase {
         }.last
         XCTAssertEqual(failure, EngineError.notAuthenticated(Engine.pi).localizedDescription)
     }
+
+    // MARK: Multi-turn on one process
+
+    private static func makeMultiTurnSettings() -> AppSettings {
+        var settings = AppSettings.default
+        settings.engine = .pi
+        settings.piPath = "/tmp/pi"
+        settings.answersDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString).path
+        return settings
+    }
+
+    private func feedTurn(
+        _ process: MockProcess,
+        deltas: [String],
+        statsResponse: String? = nil
+    ) {
+        process.feedStdout(#"{"id":"1","type":"response","command":"prompt","success":true}"#)
+        for delta in deltas {
+            process.feedStdout(
+                #"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"\#(delta)"}}"#
+            )
+        }
+        process.feedStdout(#"{"type":"agent_settled"}"#)
+        if let statsResponse {
+            process.feedStdout(statsResponse)
+        }
+    }
+
+    func testPiServesTwoTurnsOnOneProcess() async throws {
+        let launcher = MockLauncher()
+        let engine = PiEngine(launcher: launcher, fileExists: { _ in true })
+        let box = EventBox()
+        let settings = Self.makeMultiTurnSettings()
+
+        let handle = try await startSession(engine, settings: settings, box: box)
+        let process = launcher.processes[0]
+
+        let turn1 = UUID()
+        let send1 = Task.detached {
+            await engine.send(EngineRequest(prompt: "one", images: [], settings: settings), turnID: turn1, to: handle)
+        }
+        await waitForWritten(process, contains: #""type":"prompt""#)
+        feedTurn(process, deltas: ["Hello ", "from Pi!"], statsResponse:
+            #"{"type":"response","command":"get_session_stats","success":true,"data":{"contextUsage":{"tokens":60000,"contextWindow":200000,"percent":30}}}"#)
+        await send1.value
+
+        // Turn 2 rides the same process.
+        let turn2 = UUID()
+        let send2 = Task.detached {
+            await engine.send(EngineRequest(prompt: "two", images: [], settings: settings), turnID: turn2, to: handle)
+        }
+        let sawSecondPrompt = await waitFor { writtenCount(process, containing: #""type":"prompt""#) >= 2 }
+        XCTAssertTrue(sawSecondPrompt, "second turn never sent a prompt")
+        // Null contextUsage fields right after compaction must not emit.
+        feedTurn(process, deltas: ["World"], statsResponse:
+            #"{"type":"response","command":"get_session_stats","success":true,"data":{"contextUsage":{"tokens":null,"contextWindow":200000,"percent":null}}}"#)
+        await send2.value
+
+        XCTAssertEqual(launcher.count, 1, "a second CLI process was launched")
+        XCTAssertFalse(process.terminated, "process was killed between turns")
+
+        let completions = box.snapshot().compactMap { event -> (UUID, String)? in
+            if case .completed(let id, let result) = event { return (id, result.text) }
+            return nil
+        }
+        XCTAssertEqual(completions.map(\.1), ["Hello from Pi!", "World"])
+        XCTAssertEqual(completions.map(\.0), [turn1, turn2])
+
+        let stats = box.snapshot().compactMap { event -> (Int, Int)? in
+            if case .contextStats(let used, let limit) = event { return (used, limit) }
+            return nil
+        }
+        XCTAssertEqual(stats.count, 1)
+        XCTAssertEqual(stats.first?.0, 60000)
+        XCTAssertEqual(stats.first?.1, 200000)
+        try? FileManager.default.removeItem(at: URL(fileURLWithPath: settings.answersDirectory))
+        await engine.close(handle)
+    }
+
+    func testPiAbortKeepsProcessAlive() async throws {
+        let launcher = MockLauncher()
+        let engine = PiEngine(launcher: launcher, fileExists: { _ in true })
+        let box = EventBox()
+        let settings = Self.makeMultiTurnSettings()
+
+        let handle = try await startSession(engine, settings: settings, box: box)
+        let process = launcher.processes[0]
+
+        let turn1 = UUID()
+        let send1 = Task.detached {
+            await engine.send(EngineRequest(prompt: "one", images: [], settings: settings), turnID: turn1, to: handle)
+        }
+        await waitForWritten(process, contains: #""type":"prompt""#)
+
+        await engine.interrupt(handle)
+
+        // Abort is protocol bytes, not a kill.
+        XCTAssertTrue(process.written.joined().contains(#""type":"abort""#))
+        XCTAssertFalse(process.terminated, "interrupt terminated the process")
+        await send1.value
+
+        let interruptions = box.snapshot().compactMap { event -> UUID? in
+            if case .interrupted(let id) = event { return id }
+            return nil
+        }
+        XCTAssertEqual(interruptions, [turn1])
+        XCTAssertEqual(launcher.count, 1)
+        await engine.close(handle)
+    }
+
+    func testPiNewSessionClearsContextWithoutRelaunch() async throws {
+        let launcher = MockLauncher()
+        let engine = PiEngine(launcher: launcher, fileExists: { _ in true })
+        let box = EventBox()
+        let settings = Self.makeMultiTurnSettings()
+
+        let handle = try await startSession(engine, settings: settings, box: box)
+        let process = launcher.processes[0]
+
+        let turn1 = UUID()
+        let send1 = Task.detached {
+            await engine.send(EngineRequest(prompt: "one", images: [], settings: settings), turnID: turn1, to: handle)
+        }
+        await waitForWritten(process, contains: #""type":"prompt""#)
+        feedTurn(process, deltas: ["First"])
+        await send1.value
+
+        // Reset clears context in-process: new_session bytes, no relaunch.
+        await engine.reset(handle)
+        XCTAssertTrue(process.written.joined().contains(#""type":"new_session""#))
+        XCTAssertEqual(launcher.count, 1, "reset relaunched the CLI")
+        XCTAssertFalse(process.terminated, "reset killed the process")
+
+        // The session is still usable after the reset.
+        let turn2 = UUID()
+        let send2 = Task.detached {
+            await engine.send(EngineRequest(prompt: "two", images: [], settings: settings), turnID: turn2, to: handle)
+        }
+        _ = await waitFor { writtenCount(process, containing: #""type":"prompt""#) >= 2 }
+        feedTurn(process, deltas: ["Second"])
+        await send2.value
+
+        let completions = box.snapshot().compactMap { event -> String? in
+            if case .completed(_, let result) = event { return result.text }
+            return nil
+        }
+        XCTAssertEqual(completions, ["First", "Second"])
+        try? FileManager.default.removeItem(at: URL(fileURLWithPath: settings.answersDirectory))
+        await engine.close(handle)
+    }
 }
