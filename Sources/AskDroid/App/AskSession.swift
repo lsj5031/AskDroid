@@ -336,6 +336,11 @@ final class AskSession: ObservableObject {
         ))
         prompt = ""
         images = []
+        // The AppKit editor skips syncing a focused field (updateNSView
+        // bails when firstResponder === textView), so a programmatic clear
+        // while typing would leave the stale text visible. Force the view
+        // to reset, same as deliverWhileRunning / resetComposer.
+        NotificationCenter.default.post(name: .askDroidResetComposer, object: nil)
         syncMirrorsToNewestTurn()
         errorMessage = nil
         archiveError = nil
@@ -504,7 +509,6 @@ final class AskSession: ObservableObject {
         }
         transcript = []
         clearConversationUI()
-        NotificationCenter.default.post(name: .askDroidResetComposer, object: nil)
     }
 
     /// Clears the composer without dropping conversation context or history.
@@ -984,6 +988,7 @@ final class AskSession: ObservableObject {
         activity = ""
         currentRunID = nil
         phase = isExpanded ? .composing : .idle
+        NotificationCenter.default.post(name: .askDroidResetComposer, object: nil)
     }
 
     /// Diagnostics for a turn that produced no text. Reads that turn's own log
