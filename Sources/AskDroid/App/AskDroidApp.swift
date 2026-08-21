@@ -62,8 +62,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
 
-        session.$answer
-            .map { !$0.isEmpty }
+        // The transcript surface grows with history and with expanded prior
+        // turns; the answer mirror alone only fires on the empty→non-empty
+        // edge, so sink on the transcript count and the expanded row set.
+        session.$transcript
+            .map(\.count)
+            .removeDuplicates()
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.panel?.reposition()
+            }
+            .store(in: &cancellables)
+
+        session.$expandedTurnIDs
             .removeDuplicates()
             .dropFirst()
             .receive(on: RunLoop.main)

@@ -29,7 +29,8 @@ SF Pro only. 15 pt composer, 14 pt answer, 13 pt chrome, 12 pt buttons, 11 pt me
 ## Components
 
 - Compact pill: leading and trailing wings beside the camera housing (charcoal `#141416` + hairline) while a run is live. The gap under the lens stays black and never reacts to clicks (the camera cutout is dead space in every app, so clicks there are inert rather than pass-through — AppKit has no per-region `ignoresMouseEvents`). The pill sits in the menu-bar row beside the lens; its wings cover the strip of menu bar next to the notch, so clicks there expand the HUD rather than reaching the menu bar. Non-notch displays use a 280 × 34 floating capsule.
-- Expanded panel: 560 pt wide, one Island fill, content inset below the lens. Idle is prompt + Ask. A live or finished turn shows the question as a line, then the answer. Activity is a disclosure. Quit lives in Settings.
+- Expanded panel: 560 pt wide, one Island fill, content inset below the lens. Idle is prompt + Ask. With conversation history the panel is the multi-turn surface: collapsed prior turns above the newest turn, footer meta, then the composer, which persists for follow-ups and steering.
+- Collapsed turn row: the question-as-a-line repeated — status glyph, question truncated to one line, duration, disclosure chevron (13 pt, Mute; duration 11 pt monospaced digit). Tap expands that turn's answer in place inside the shared scroll.
 - Primary action: amber capsule. Secondary: well capsule.
 - Status dot: 8 pt, amber pulse while running.
 
@@ -41,6 +42,7 @@ SF Pro only. 15 pt composer, 14 pt answer, 13 pt chrome, 12 pt buttons, 11 pt me
 
 - Idle / composing HUD
 - Running stream + compact pill
+- Multi-turn conversation: collapsed prior turns above the full-size newest turn in one capped scroll; composer stays available below for follow-ups and steering
 - Completed answer with copy / open file
 - Failed / missing droid
 - Settings overrides

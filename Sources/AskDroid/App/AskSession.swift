@@ -31,6 +31,24 @@ struct Turn: Identifiable, Equatable {
 struct ContextStats: Equatable {
     let used: Int
     let limit: Int
+
+    /// Compact footer label ("ctx 14.6k / 922k"). In a notch panel where the
+    /// conversation scrolls out of view, this is the one number worth
+    /// surfacing.
+    var label: String {
+        func short(_ value: Int) -> String {
+            switch value {
+            case ..<1_000:
+                "\(value)"
+            case ..<100_000:
+                String(format: "%.1fk", Double(value) / 1_000)
+            default:
+                "\(value / 1_000)k"
+            }
+        }
+        guard limit > 0 else { return "ctx ?" }
+        return "ctx \(short(used)) / \(short(limit))"
+    }
 }
 
 @MainActor
@@ -51,6 +69,9 @@ final class AskSession: ObservableObject {
     @Published var prompt = ""
     @Published var images: [AttachedImage] = []
     @Published var transcript: [Turn] = []
+    /// Prior turns the HUD renders expanded. Lives on the session (not the
+    /// view) so the panel's reposition sinks can track it.
+    @Published var expandedTurnIDs: Set<UUID> = []
     @Published var contextStats: ContextStats?
     @Published var answer = ""
     @Published var thinking = ""
@@ -254,6 +275,25 @@ final class AskSession: ObservableObject {
         // late .interrupted event routes here too and finds the turn terminal.
         markTurnInterrupted(turnID)
         AskLog.line("turn \(turnID.uuidString.prefix(8)) interrupted by user")
+    }
+
+    /// Expands or collapses a prior turn's row in the transcript surface.
+    func toggleExpandedRow(_ id: UUID) {
+        if expandedTurnIDs.contains(id) {
+            expandedTurnIDs.remove(id)
+        } else {
+            expandedTurnIDs.insert(id)
+        }
+    }
+
+    /// Resubmits the most recent failed turn's question (and images) as a new
+    /// turn. The failed turn stays in the transcript.
+    func retryFailedTurn() {
+        guard phase != .running else { return }
+        guard let failed = transcript.last(where: { $0.status == .failed }) else { return }
+        prompt = failed.question
+        images = failed.images
+        submit()
     }
 
     /// Clears the engine's conversation context and the transcript. The
@@ -612,6 +652,7 @@ final class AskSession: ObservableObject {
         copied = false
         notice = nil
         contextStats = nil
+        expandedTurnIDs = []
         activity = ""
         currentRunID = nil
         phase = isExpanded ? .composing : .idle

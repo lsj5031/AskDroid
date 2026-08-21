@@ -1538,6 +1538,59 @@ final class AskSessionTests: XCTestCase {
         XCTAssertEqual(session.transcript[0].answer, "Two")
         XCTAssertEqual(launcher.count, 2)
     }
+
+    // MARK: Transcript surface (plan 008 Phase 6)
+
+    func testContextStatsSurfacesForFooterMeta() {
+        let session = makeSession(launcher: MockLauncher())
+        XCTAssertNil(session.contextStats)
+        session.handle(.contextStats(used: 14_601, limit: 922_000))
+        XCTAssertEqual(session.contextStats, ContextStats(used: 14_601, limit: 922_000))
+        XCTAssertEqual(session.contextStats?.label, "ctx 14.6k / 922k")
+    }
+
+    func testContextStatsLabelHandlesSmallAndHugeFills() {
+        XCTAssertEqual(ContextStats(used: 512, limit: 200_000).label, "ctx 512 / 200k")
+        XCTAssertEqual(ContextStats(used: 60_000, limit: 200_000).label, "ctx 60.0k / 200k")
+    }
+
+    func testToggleExpandedRowTracksPriorTurns() {
+        let session = makeSession(launcher: MockLauncher())
+        let id = UUID()
+        XCTAssertTrue(session.expandedTurnIDs.isEmpty)
+        session.toggleExpandedRow(id)
+        XCTAssertEqual(session.expandedTurnIDs, [id])
+        session.toggleExpandedRow(id)
+        XCTAssertTrue(session.expandedTurnIDs.isEmpty)
+    }
+
+    func testRetryFailedTurnResubmitsItsQuestion() async {
+        let launcher = MockLauncher()
+        let session = makeSession(launcher: launcher)
+        session.isExpanded = true
+        session.prompt = "find the bug"
+        session.submit()
+
+        _ = await waitFor { launcher.count >= 1 }
+        let process = launcher.processes[0]
+        feedDroidInit(process)
+        _ = await waitForWritten(process, contains: "add_user_message")
+        feedDroidTurn(process, delta: nil, reason: "error")
+        _ = await waitForSession { session.transcript.first?.status == .failed }
+        XCTAssertTrue(session.prompt.isEmpty, "composer should have emptied on submit")
+
+        // Try again restores the failed question as a NEW turn.
+        session.retryFailedTurn()
+        XCTAssertEqual(session.transcript.count, 2, "retry must not wipe the failed turn")
+        XCTAssertEqual(session.transcript[0].status, .failed)
+        XCTAssertEqual(session.transcript[1].question, "find the bug")
+        XCTAssertEqual(session.transcript[1].status, .running)
+        let sawSecondMessage = await waitForSession { writtenCount(process, containing: "add_user_message") >= 2 }
+        XCTAssertTrue(sawSecondMessage, "retry never sent the question")
+        feedDroidTurn(process, delta: "fixed")
+        _ = await waitForSession { session.transcript[1].status == .completed }
+        XCTAssertEqual(session.transcript[1].answer, "fixed")
+    }
 }
 
 final class SettingsStoreTests: XCTestCase {

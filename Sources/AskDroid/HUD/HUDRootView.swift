@@ -140,11 +140,10 @@ struct ExpandedHUD: View {
     @State private var answerContentMinY: CGFloat = 0
     @State private var answerViewportHeight: CGFloat = 0
 
-    private var showingResult: Bool {
-        // After an interrupt the composer must be immediately usable, so the
-        // result surface steps aside (the transcript surface lands in Phase 6).
-        session.phase == .running || session.phase == .failed
-            || (session.phase != .interrupted && !session.answer.isEmpty)
+    private var showsConversation: Bool {
+        // Any history or a live turn makes the panel the conversation
+        // surface; fresh idle state stays composer-only.
+        !session.transcript.isEmpty || session.phase == .running
     }
 
     var body: some View {
@@ -161,11 +160,8 @@ struct ExpandedHUD: View {
                     SettingsPane(session: session)
                         .padding(20)
                 }
-            } else if showingResult {
-                questionLine
-                Divider().overlay(Theme.hairline)
-                answerBlock
-                footer
+            } else if showsConversation {
+                conversation
             } else {
                 composer
             }
@@ -241,24 +237,166 @@ struct ExpandedHUD: View {
         .padding(.vertical, 14)
     }
 
-    private var questionLine: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Text(session.prompt.isEmpty ? "Look at the attached image(s)." : session.prompt)
+    private var conversation: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            transcriptBlock
+            Divider().overlay(Theme.hairline)
+            footer
+            composer
+        }
+    }
+
+    /// Collapsed prior-turn rows and the full-size newest turn share one
+    /// capped scroll so the panel never grows unbounded with history.
+    private var transcriptBlock: some View {
+        ScrollViewReader { proxy in
+            ZStack(alignment: .bottomTrailing) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        ForEach(priorTurns) { turn in
+                            CollapsedTurnRow(
+                                turn: turn,
+                                isExpanded: session.expandedTurnIDs.contains(turn.id),
+                                onToggle: { session.toggleExpandedRow(turn.id) }
+                            )
+                        }
+                        if !priorTurns.isEmpty {
+                            Divider().overlay(Theme.hairline)
+                        }
+                        newestTurnContent
+                        Color.clear
+                            .frame(height: 1)
+                            .id(AnswerScrollAnchor.bottom)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 16)
+                    .background {
+                        GeometryReader { proxy in
+                            Color.clear
+                                .preference(
+                                    key: AnswerContentHeightKey.self,
+                                    value: proxy.size.height
+                                )
+                                .preference(
+                                    key: AnswerContentMinYKey.self,
+                                    value: proxy.frame(in: .named(AnswerScrollSpace.name)).minY
+                                )
+                        }
+                    }
+                }
+                .frame(maxHeight: 280)
+                // Stay pinned to the bottom while streaming so new text is
+                // always visible; the user can scroll up to detach.
+                .defaultScrollAnchor(.bottom)
+                .coordinateSpace(name: AnswerScrollSpace.name)
+                .background {
+                    GeometryReader { proxy in
+                        Color.clear
+                            .preference(
+                                key: AnswerViewportHeightKey.self,
+                                value: proxy.size.height
+                            )
+                    }
+                }
+
+                if session.phase == .running, answerHasOverflow, !answerIsNearBottom {
+                    Button {
+                        followAnswer(proxy)
+                    } label: {
+                        Label("Latest", systemImage: "arrow.down")
+                    }
+                    .buttonStyle(GhostButtonStyle())
+                    .accessibilityLabel("Jump to latest answer")
+                    .padding(.trailing, 20)
+                    .padding(.bottom, 12)
+                    .transition(.opacity)
+                }
+            }
+            .onPreferenceChange(AnswerContentHeightKey.self) { answerContentHeight = $0 }
+            .onPreferenceChange(AnswerContentMinYKey.self) { answerContentMinY = $0 }
+            .onPreferenceChange(AnswerViewportHeightKey.self) { answerViewportHeight = $0 }
+            .onChange(of: session.phase) { _, phase in
+                switch phase {
+                case .failed:
+                    activityLogExpanded = true
+                case .running:
+                    activityLogExpanded = false
+                default:
+                    break
+                }
+            }
+            .onAppear {
+                if session.phase == .failed {
+                    activityLogExpanded = true
+                }
+            }
+        }
+    }
+
+    private var priorTurns: [Turn] {
+        Array(session.transcript.dropLast())
+    }
+
+    /// The newest turn renders full-size. Its mirrors on the session are kept
+    /// in sync with this turn; older turns read their own `Turn` values.
+    private var newestTurnContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(newestQuestion)
                 .font(.system(size: 13))
                 .foregroundStyle(Theme.mute)
                 .lineSpacing(2)
-                .lineLimit(session.phase == .running ? 2 : 3)
-                .truncationMode(.tail)
                 .textSelection(.enabled)
-                .help(session.prompt.isEmpty ? "Look at the attached image(s)." : session.prompt)
-            Spacer(minLength: 8)
-            if session.phase == .running {
-                Button("Cancel", action: session.interruptTurn)
-                    .buttonStyle(GhostButtonStyle())
+            if session.phase == .failed, let errorMessage = session.errorMessage {
+                failureBlock(errorMessage)
+            }
+            if let archiveError = session.archiveError {
+                Text(archiveError)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.dangerText)
+                    .textSelection(.enabled)
+            }
+            if !session.thinking.isEmpty, session.answer.isEmpty || session.phase == .running {
+                Text(session.thinking)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.mute)
+                    .lineSpacing(2)
+                    .textSelection(.enabled)
+            }
+            if !session.answer.isEmpty {
+                Markdown(session.answer)
+                    .markdownTheme(AskDroidMarkdown.theme)
+                    .lineSpacing(3)
+                    .tracking(0.1)
+                    .textSelection(.enabled)
+            } else if session.phase == .running {
+                Text(session.activity)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.mute)
+            }
+            if !session.runLog.isEmpty {
+                DisclosureGroup("Activity", isExpanded: $activityLogExpanded) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        ForEach(Array(session.runLog.suffix(20).enumerated()), id: \.offset) { _, line in
+                            Text(line)
+                                .font(.system(size: 11).monospaced())
+                                .foregroundStyle(Theme.mute)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Theme.mute)
             }
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
+    }
+
+    private var newestQuestion: String {
+        if let newest = session.transcript.last {
+            return newest.question.isEmpty ? "Look at the attached image(s)." : newest.question
+        }
+        return session.prompt.isEmpty ? "Look at the attached image(s)." : session.prompt
     }
 
     private var composer: some View {
@@ -329,124 +467,6 @@ struct ExpandedHUD: View {
         answerContentHeight > answerViewportHeight + 8
     }
 
-    private var answerBlock: some View {
-        ScrollViewReader { proxy in
-            ZStack(alignment: .bottomTrailing) {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
-                        if session.phase == .failed, let errorMessage = session.errorMessage {
-                            failureBlock(errorMessage)
-                        }
-                        if let archiveError = session.archiveError {
-                            Text(archiveError)
-                                .font(.system(size: 13))
-                                .foregroundStyle(Theme.dangerText)
-                                .textSelection(.enabled)
-                        }
-                        if !session.thinking.isEmpty, session.answer.isEmpty || session.phase == .running {
-                            Text(session.thinking)
-                                .font(.system(size: 12))
-                                .foregroundStyle(Theme.mute)
-                                .lineSpacing(2)
-                                .textSelection(.enabled)
-                        }
-                        if !session.answer.isEmpty {
-                            Markdown(session.answer)
-                                .markdownTheme(AskDroidMarkdown.theme)
-                                .lineSpacing(3)
-                                .tracking(0.1)
-                                .textSelection(.enabled)
-                        } else if session.phase == .running {
-                            Text(session.activity)
-                                .font(.system(size: 13))
-                                .foregroundStyle(Theme.mute)
-                        }
-                        if !session.runLog.isEmpty {
-                            DisclosureGroup("Activity", isExpanded: $activityLogExpanded) {
-                                VStack(alignment: .leading, spacing: 3) {
-                                    ForEach(Array(session.runLog.suffix(20).enumerated()), id: \.offset) { _, line in
-                                        Text(line)
-                                            .font(.system(size: 11).monospaced())
-                                            .foregroundStyle(Theme.mute)
-                                            .textSelection(.enabled)
-                                            .fixedSize(horizontal: false, vertical: true)
-                                    }
-                                }
-                            }
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(Theme.mute)
-                        }
-                        Color.clear
-                            .frame(height: 1)
-                            .id(AnswerScrollAnchor.bottom)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 16)
-                    .background {
-                        GeometryReader { proxy in
-                            Color.clear
-                                .preference(
-                                    key: AnswerContentHeightKey.self,
-                                    value: proxy.size.height
-                                )
-                                .preference(
-                                    key: AnswerContentMinYKey.self,
-                                    value: proxy.frame(in: .named(AnswerScrollSpace.name)).minY
-                                )
-                        }
-                    }
-                }
-                .frame(maxHeight: 280)
-                // Stay pinned to the bottom while streaming so new text is
-                // always visible; the user can scroll up to detach.
-                .defaultScrollAnchor(.bottom)
-                .coordinateSpace(name: AnswerScrollSpace.name)
-                .background {
-                    GeometryReader { proxy in
-                        Color.clear
-                            .preference(
-                                key: AnswerViewportHeightKey.self,
-                                value: proxy.size.height
-                            )
-                    }
-                }
-
-                if session.phase == .running, answerHasOverflow, !answerIsNearBottom {
-                    Button {
-                        followAnswer(proxy)
-                    } label: {
-                        Label("Latest", systemImage: "arrow.down")
-                    }
-                    .buttonStyle(GhostButtonStyle())
-                    .accessibilityLabel("Jump to latest answer")
-                    .padding(.trailing, 20)
-                    .padding(.bottom, 12)
-                    .transition(.opacity)
-                }
-            }
-            .onPreferenceChange(AnswerContentHeightKey.self) { answerContentHeight = $0 }
-            .onPreferenceChange(AnswerContentMinYKey.self) { answerContentMinY = $0 }
-            .onPreferenceChange(AnswerViewportHeightKey.self) { answerViewportHeight = $0 }
-            .onChange(of: session.phase) { _, phase in
-                switch phase {
-                case .failed:
-                    activityLogExpanded = true
-                case .running:
-                    activityLogExpanded = false
-                default:
-                    break
-                }
-            }
-            .onAppear {
-                if session.phase == .failed {
-                    activityLogExpanded = true
-                }
-            }
-
-        }
-    }
-
     private func followAnswer(_ proxy: ScrollViewProxy) {
         withAnimation(.easeOut(duration: 0.18)) {
             proxy.scrollTo(AnswerScrollAnchor.bottom, anchor: .bottom)
@@ -478,12 +498,19 @@ struct ExpandedHUD: View {
         HStack(spacing: 10) {
             if session.phase == .running {
                 MetaLabel(AnswerArchive.formatDuration(session.elapsed))
+                Button("Cancel", action: session.interruptTurn)
+                    .buttonStyle(GhostButtonStyle())
+                    .help("Stop this turn; the conversation stays open")
             }
             if let durationText = session.durationText {
                 MetaLabel(durationText)
             }
             if let tokenSummary = session.tokenSummary {
                 MetaLabel(tokenSummary)
+            }
+            if let stats = session.contextStats {
+                MetaLabel(stats.label)
+                    .help("Context window fill reported by \(session.settings.engine.title)")
             }
             Spacer()
             if !session.answer.isEmpty {
@@ -510,11 +537,11 @@ struct ExpandedHUD: View {
             }
             if session.phase == .failed {
                 Button("Try again") {
-                    session.submit()
+                    session.retryFailedTurn()
                 }
                 .buttonStyle(PrimaryButtonStyle())
             }
-            if session.phase == .completed || session.phase == .failed {
+            if session.phase == .completed || session.phase == .failed || session.phase == .interrupted {
                 Button {
                     session.startNewConversation()
                 } label: {
@@ -552,6 +579,98 @@ struct ExpandedHUD: View {
             }
         }
         return accepted
+    }
+}
+
+/// One prior turn in the transcript: a single collapsed line — status glyph,
+/// question, duration — that expands in place to reveal that turn's answer.
+/// Repeats the established question-as-a-line row (13 pt, mute).
+struct CollapsedTurnRow: View {
+    let turn: Turn
+    let isExpanded: Bool
+    var onToggle: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button(action: onToggle) {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Image(systemName: glyph)
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(glyphColor)
+                        .frame(width: 12)
+                    Text(turn.question.isEmpty ? "Look at the attached image(s)." : turn.question)
+                        .font(.system(size: 13))
+                        .foregroundStyle(Theme.mute)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Spacer(minLength: 8)
+                    if let duration = turn.durationText {
+                        Text(duration)
+                            .font(.system(size: 11).monospacedDigit())
+                            .foregroundStyle(Theme.mute)
+                    }
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Theme.mute)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("\(statusWord) turn: \(turn.question)")
+            .accessibilityHint(isExpanded ? "Collapse this turn" : "Expand this turn")
+            .help(turn.question)
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 8) {
+                    if let error = turn.errorMessage {
+                        Text(error)
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.dangerText)
+                            .textSelection(.enabled)
+                    }
+                    if !turn.answer.isEmpty {
+                        Markdown(turn.answer)
+                            .markdownTheme(AskDroidMarkdown.theme)
+                            .lineSpacing(3)
+                            .tracking(0.1)
+                            .textSelection(.enabled)
+                    } else if !turn.thinking.isEmpty {
+                        Text(turn.thinking)
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.mute)
+                            .lineSpacing(2)
+                            .textSelection(.enabled)
+                    }
+                }
+                .padding(.leading, 22)
+                .transition(.opacity)
+            }
+        }
+    }
+
+    private var glyph: String {
+        switch turn.status {
+        case .completed: "checkmark"
+        case .failed: "exclamationmark"
+        case .interrupted: "stop.fill"
+        case .running: "circle.dotted"
+        }
+    }
+
+    private var glyphColor: Color {
+        switch turn.status {
+        case .completed: Theme.success
+        case .failed: Theme.danger
+        case .interrupted, .running: Theme.mute
+        }
+    }
+
+    private var statusWord: String {
+        switch turn.status {
+        case .completed: "Completed"
+        case .failed: "Failed"
+        case .interrupted: "Interrupted"
+        case .running: "Running"
+        }
     }
 }
 
