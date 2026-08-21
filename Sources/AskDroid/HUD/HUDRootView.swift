@@ -683,16 +683,35 @@ struct ExpandedHUD: View {
     }
 
     private func failureBlock(_ message: String) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Theme.danger)
-                .padding(.top, 2)
-            Text(message)
-                .font(.system(size: 13))
-                .foregroundStyle(Theme.ink)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
+        let isLocalNetwork = message.localizedCaseInsensitiveContains("Local Network")
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.danger)
+                    .padding(.top, 2)
+                Text(message)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Theme.ink)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if isLocalNetwork {
+                HStack(spacing: 8) {
+                    Button("Open System Settings") {
+                        LocalNetworkPermission.openSettings()
+                    }
+                    .buttonStyle(PrimaryButtonStyle())
+                    Button("Try Again") {
+                        session.retryFailedTurn()
+                    }
+                    .buttonStyle(GhostButtonStyle())
+                }
+                Text("Enable AskDroid in Privacy & Security → Local Network, then quit and relaunch AskDroid.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.mute)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)

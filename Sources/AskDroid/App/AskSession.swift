@@ -285,6 +285,16 @@ final class AskSession: ObservableObject {
     /// both land here.
     func submit(_ intent: DeliveryIntent? = nil) {
         guard canSubmit else { return }
+        if LocalNetworkPermission.shouldPrime {
+            // New binary hasn't triggered the system prompt yet. Pause and
+            // prime with HUD hidden (AppDelegate already does this for the
+            // normal launch, this is the login-launch/fallback path). Don't
+            // burn the user's question on a guaranteed `Connection error.`
+            LocalNetworkPermission.prime()
+            notice = "AskDroid needs Local Network access — allow in the system prompt, then try again. If you missed it: System Settings → Privacy & Security → Local Network."
+            AskLog.line("submit paused for local network prime")
+            return
+        }
         if phase == .running {
             deliverWhileRunning(intent ?? defaultDeliveryIntent)
             return

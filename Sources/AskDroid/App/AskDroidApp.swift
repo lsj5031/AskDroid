@@ -22,6 +22,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if LaunchContext.isLoginLaunch() {
             AskLog.line("login launch; staying hidden")
+        } else if LocalNetworkPermission.shouldPrime {
+            // New binary: prime Local Network while HUD is hidden so the
+            // system prompt isn't buried behind the panel (first turns would
+            // otherwise fail with `Connection error.` — see askdroid.log 19:44:58).
+            LocalNetworkPermission.prime()
+            AskLog.line("deferring present for local network prime")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak controller, weak session] in
+                guard let controller, let session else { return }
+                session.present()
+                controller.pinToCurrentScreen()
+                controller.updateVisibility()
+                AskLog.line("presented after prime \(controller.debugDescription)")
+            }
         } else {
             session.present()
             controller.pinToCurrentScreen()
