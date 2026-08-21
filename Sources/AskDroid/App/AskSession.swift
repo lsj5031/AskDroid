@@ -331,6 +331,9 @@ final class AskSession: ObservableObject {
             phase = .failed
             AskLog.line("run \(runID.uuidString.prefix(8)) failed: \(message)")
             notifyIfCollapsed(success: false)
+        case .interrupted, .sessionReady, .contextStats, .queueChanged, .sessionEnded:
+            // Wired up with the persistent-session UI (plan 008 Phase 5).
+            break
         }
     }
 

@@ -3,7 +3,11 @@ import Foundation
 actor DroidEngine: EngineClient {
     private let launcher: any ProcessLaunching
     private let fileExists: @Sendable (String) -> Bool
-    private var activeProcess: (runID: UUID, process: any ProcessIO)?
+    /// The session established by `begin`. A new `begin` retires it — one
+    /// live CLI per engine.
+    private var activeHandle: SessionHandle?
+    /// Legacy one-shot runs keyed by run id so `cancel(runID:)` keeps working.
+    private var legacyRuns: [UUID: SessionHandle] = [:]
 
     init(
         launcher: any ProcessLaunching = FoundationProcessLauncher(),
@@ -13,12 +17,141 @@ actor DroidEngine: EngineClient {
         self.fileExists = fileExists
     }
 
-    func cancel(runID: UUID) {
-        guard let active = activeProcess, active.runID == runID else { return }
-        active.process.terminate()
-        activeProcess = nil
+    func begin(
+        settings: AppSettings,
+        onEvent: @escaping @Sendable (EngineEvent) -> Void
+    ) async throws -> SessionHandle {
+        guard let executable = BinaryDiscovery.resolve(
+            engine: .droid,
+            override: settings.droidPath,
+            fileExists: fileExists
+        ) else {
+            throw EngineError.binaryNotFound(.droid)
+        }
+
+        let cwd = settings.resolvedWorkingDirectory
+        try FileManager.default.createDirectory(
+            atPath: cwd,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            atPath: settings.resolvedAnswersDirectory,
+            withIntermediateDirectories: true
+        )
+
+        if let stale = activeHandle {
+            activeHandle = nil
+            await stale.terminateProcess()
+        }
+
+        let config = EngineProcessRunner.Configuration(
+            engine: .droid,
+            initialActivity: "Opening a Droid session…",
+            initializeSession: { process, session in
+                let id = await session.registerRequest(as: .initialize)
+                try process.write(try JSONRPC.encodeLine(JSONRPC.request(
+                    id: id,
+                    method: "droid.initialize_session",
+                    params: Self.initializeParams(from: settings)
+                )))
+            },
+            acceptTimeoutMessage: "Droid did not start a session in time.",
+            turnTimeoutMessage: "Droid did not finish in 10 minutes.",
+            isInitialAccepted: { await $0.didInitialize },
+            isAuthError: { line in
+                line.localizedCaseInsensitiveContains("not authenticated")
+                    || line.localizedCaseInsensitiveContains("FACTORY_API_KEY")
+                    || line.localizedCaseInsensitiveContains("invalid api key")
+            },
+            handleLine: { [weak self] line, process, session, turn, turnEnded in
+                await self?.handle(
+                    line: line,
+                    process: process,
+                    session: session,
+                    turn: turn,
+                    turnEnded: turnEnded,
+                    onEvent: onEvent
+                )
+            },
+            composeTurnMessage: { process, session, turn in
+                onEvent(.activity(turn.turnID, "Sending your question…"))
+                let id = await session.registerRequest(as: .userMessage)
+                try process.write(try JSONRPC.encodeLine(JSONRPC.request(
+                    id: id,
+                    method: "droid.add_user_message",
+                    params: Self.userMessageParams(from: turn.request)
+                )))
+                onEvent(.activity(turn.turnID, "Waiting for Droid…"))
+                onEvent(.log(turn.turnID, "Question sent"))
+                await turn.appendLog("Question sent")
+            },
+            onTurnEnd: { _, _ in
+                // Engine-side bookkeeping (context stats) rides the runner's
+                // turnDidEnd hook.
+            },
+            onProcessExit: { _ in
+                // The handle owns exit bookkeeping; nothing engine-side to do.
+            }
+        )
+
+        let handle = SessionHandle(
+            engine: .droid,
+            settings: settings,
+            sink: onEvent,
+            config: config,
+            makeProcess: {
+                try self.launcher.launch(
+                    executable: executable,
+                    arguments: Self.arguments(from: settings),
+                    environment: EngineSupport.augmentedEnvironment(),
+                    cwd: cwd
+                )
+            }
+        )
+        activeHandle = handle
+        try await handle.open()
+        onEvent(.sessionReady(handle, model: nil))
+        return handle
     }
 
+    func interrupt(_ handle: SessionHandle) async {
+        if let process = await handle.process, let state = await handle.state {
+            let id = await state.registerRequest(as: .interrupt)
+            if let line = try? JSONRPC.encodeLine(JSONRPC.request(
+                id: id,
+                method: "droid.interrupt_session",
+                params: [:]
+            )) {
+                try? process.write(line)
+            }
+        }
+        // The turn ends locally; droid's acknowledgement is incidental. No
+        // terminate() — the session stays usable.
+        await handle.interruptCurrentTurn()
+    }
+
+    func reset(_ handle: SessionHandle) async {
+        // Safe default: without a live probe of droid's reset semantics, a
+        // fresh process is the only way to guarantee cleared context.
+        _ = try? await handle.relaunch()
+    }
+
+    func close(_ handle: SessionHandle) async {
+        if let process = await handle.process, let state = await handle.state {
+            let id = await state.registerRequest(as: .closeSession)
+            if let line = try? JSONRPC.encodeLine(JSONRPC.request(
+                id: id,
+                method: "droid.close_session",
+                params: [:]
+            )) {
+                try? process.write(line)
+            }
+        }
+        await handle.shutdown()
+        if activeHandle === handle { activeHandle = nil }
+    }
+
+    /// Legacy one-shot convenience: `begin` → one turn → `close`.
     func run(
         _ request: EngineRequest,
         runID: UUID = UUID(),
@@ -28,113 +161,26 @@ actor DroidEngine: EngineClient {
         onEvent(.activity(runID, "Starting Droid…"))
         onEvent(.log(runID, "Looking for the droid CLI…"))
 
-        guard let executable = BinaryDiscovery.resolve(
-            engine: .droid,
-            override: request.settings.droidPath,
-            fileExists: fileExists
-        ) else {
-            onEvent(.failed(runID, EngineError.binaryNotFound(Engine.droid).localizedDescription))
-            return
-        }
-        onEvent(.log(runID, "Using \(executable)"))
-
         do {
-            var arguments = [
-                "exec",
-                "--input-format", "stream-jsonrpc",
-                "--output-format", "stream-jsonrpc",
-            ]
-            if let autonomy = request.settings.autonomy.protocolValue {
-                arguments += ["--auto", autonomy]
-            }
-            if let model = request.settings.modelOverride.trimmedOrNil {
-                arguments += ["--model", model]
-            }
-            if let reasoning = request.settings.reasoning.protocolValue {
-                arguments += ["--reasoning-effort", reasoning]
-            }
-
-            let cwd = request.settings.resolvedWorkingDirectory
-            try FileManager.default.createDirectory(
-                atPath: cwd,
-                withIntermediateDirectories: true
-            )
-            try FileManager.default.createDirectory(
-                atPath: request.settings.resolvedAnswersDirectory,
-                withIntermediateDirectories: true
-            )
-
-            let process = try launcher.launch(
-                executable: executable,
-                arguments: arguments,
-                environment: EngineSupport.augmentedEnvironment(),
-                cwd: cwd
-            )
-            if let stale = activeProcess {
-                stale.process.terminate()
-            }
-            activeProcess = (runID, process)
-
-            let config = EngineProcessRunner.Configuration(
-                engine: .droid,
-                initialActivity: "Opening a Droid session…",
-                sendInitialMessage: { process, _ in
-                    try process.write(try JSONRPC.encodeLine(JSONRPC.request(
-                        id: "1",
-                        method: "droid.initialize_session",
-                        params: Self.initializeParams(from: request.settings)
-                    )))
-                    onEvent(.log(runID, "initialize_session sent"))
-                },
-                acceptTimeoutMessage: "Droid did not start a session in time.",
-                turnTimeoutMessage: "Droid did not finish in 10 minutes.",
-                isInitialAccepted: { await $0.didInitialize },
-                isAuthError: { line in
-                    line.localizedCaseInsensitiveContains("not authenticated")
-                        || line.localizedCaseInsensitiveContains("FACTORY_API_KEY")
-                        || line.localizedCaseInsensitiveContains("invalid api key")
-                },
-                handleLine: { [weak self] line, process, session, turn, turnEnded in
-                    await self?.handle(
-                        line: line,
-                        process: process,
-                        session: session,
-                        turn: turn,
-                        turnEnded: turnEnded,
-                        turnID: runID,
-                        onEvent: onEvent
-                    )
-                },
-                onTurnEnd: { _, _ in
-                    // Engine-side bookkeeping lands with the persistent lifecycle.
-                },
-                onProcessExit: { [weak self] _ in
-                    await self?.clearActiveProcess(runID: runID)
-                }
-            )
-
-            await EngineProcessRunner.run(process: process, request: request, turnID: runID, config: config, onEvent: onEvent)
-            if activeProcess?.runID == runID {
-                activeProcess = nil
-            }
+            let handle = try await begin(settings: request.settings, onEvent: onEvent)
+            legacyRuns[runID] = handle
+            await handle.send(request, turnID: runID, lifetime: .oneShot)
+            legacyRuns[runID] = nil
+            await close(handle)
         } catch is CancellationError {
-            if activeProcess?.runID == runID {
-                activeProcess?.process.terminate()
-                activeProcess = nil
-            }
             onEvent(.failed(runID, EngineError.cancelled.localizedDescription))
         } catch {
-            if activeProcess?.runID == runID {
-                activeProcess = nil
-            }
             onEvent(.failed(runID, error.localizedDescription))
         }
     }
 
-    private func clearActiveProcess(runID: UUID) {
-        if activeProcess?.runID == runID {
-            activeProcess = nil
-        }
+    /// Legacy cancel for one-shot runs: kills the process; the death watch
+    /// classifies the turn as cancelled. Persistent sessions use
+    /// `interrupt(_:)` instead, which keeps the session alive.
+    func cancel(runID: UUID) async {
+        guard let handle = legacyRuns[runID] else { return }
+        legacyRuns[runID] = nil
+        await handle.terminateProcess()
     }
 
     private func handle(
@@ -143,15 +189,12 @@ actor DroidEngine: EngineClient {
         session: EngineSession,
         turn: TurnState,
         turnEnded: TurnEnder,
-        turnID: UUID,
         onEvent: @escaping @Sendable (EngineEvent) -> Void
     ) async {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, let message = try? JSONRPC.parse(trimmed) else { return }
 
-        // The turn is over; ignore stragglers. The reader keeps running for
-        // the life of the process.
-        if await turn.isEnded { return }
+        let turnID = turn.turnID
 
         if message["method"] as? String == "droid.request_permission",
            let id = stringID(message["id"])
@@ -171,47 +214,58 @@ actor DroidEngine: EngineClient {
             let detail = (error["message"] as? String) ?? "Droid request failed."
             onEvent(.log(turnID, detail))
             await turn.appendLog(detail)
-            await turn.mark(error: detail)
-            process.terminate()
-            return
-        }
-
-        if stringID(message["id"]) == "1" {
-            if await session.didInitialize { return }
-            await session.markInitialized()
-            if let result = message["result"] as? [String: Any] {
-                if let sessionObject = result["session"] as? [String: Any],
-                   let settings = sessionObject["settings"] as? [String: Any],
-                   let modelId = settings["modelId"] as? String
-                {
-                    await session.setModel(modelId)
-                    onEvent(.log(turnID, "Model \(modelId)"))
-                } else if let modelId = result["modelId"] as? String {
-                    await session.setModel(modelId)
-                    onEvent(.log(turnID, "Model \(modelId)"))
+            var fatal = true
+            if let id = stringID(message["id"]), let kind = await session.requestKind(for: id) {
+                await session.fulfillRequest(id: id)
+                switch kind {
+                case .contextStats, .interrupt, .closeSession:
+                    // Bookkeeping requests must not tear down the session.
+                    fatal = false
+                case .initialize, .userMessage:
+                    fatal = true
                 }
             }
-            onEvent(.activity(turnID, "Sending your question…"))
-            do {
-                try process.write(try JSONRPC.encodeLine(JSONRPC.request(
-                    id: "2",
-                    method: "droid.add_user_message",
-                    params: Self.userMessageParams(from: turn.request)
-                )))
-                onEvent(.activity(turnID, "Waiting for Droid…"))
-                onEvent(.log(turnID, "Question sent"))
-                await turn.appendLog("Question sent")
-            } catch {
-                await turn.mark(error: error.localizedDescription)
+            if fatal {
+                await turn.mark(error: detail)
                 process.terminate()
             }
             return
         }
 
-        if stringID(message["id"]) == "2" {
-            onEvent(.activity(turnID, "Droid is working…"))
-            return
+        // Responses correlate through the pending-request registry; ids are
+        // monotonic, so no branch is pinned to a hardcoded id.
+        if let id = stringID(message["id"]), let kind = await session.requestKind(for: id) {
+            await session.fulfillRequest(id: id)
+            switch kind {
+            case .initialize:
+                await session.markInitialized()
+                if let result = message["result"] as? [String: Any] {
+                    var modelId: String?
+                    if let sessionObject = result["session"] as? [String: Any],
+                       let settings = sessionObject["settings"] as? [String: Any]
+                    {
+                        modelId = settings["modelId"] as? String
+                    }
+                    if modelId == nil {
+                        modelId = result["modelId"] as? String
+                    }
+                    if let modelId {
+                        await session.setModel(modelId)
+                        onEvent(.log(turnID, "Model \(modelId)"))
+                    }
+                }
+                return
+            case .userMessage:
+                onEvent(.activity(turnID, "Droid is working…"))
+                return
+            case .contextStats, .interrupt, .closeSession:
+                return
+            }
         }
+
+        // The turn is over; ignore stragglers. The reader keeps running for
+        // the life of the process.
+        if await turn.isEnded { return }
 
         switch DroidNotificationParser.parse(message) {
         case .assistantTextDelta(let text):
@@ -252,11 +306,13 @@ actor DroidEngine: EngineClient {
             if let durationMs {
                 await turn.applyDuration(durationMs: durationMs)
             }
-            // The turn ended. Ending a turn is a protocol event — it is not
-            // process death (the runner owns the physical teardown).
-            if await turn.end(.completed, tokenUsage: usage) {
-                await turnEnded(turn, .completed)
+            if let usage {
+                await turn.setUsage(usage)
             }
+            // The turn ended. Ending a turn is a protocol event — it is not
+            // process death (the handle owns the physical teardown). The
+            // handle's endTurn performs the first-wins end and settles.
+            await turnEnded(turn, .completed)
         case .ignored:
             // Unknown session_notification subtypes are noise; anything else with a
             // method name is worth surfacing for diagnostics.
@@ -277,6 +333,24 @@ actor DroidEngine: EngineClient {
         if let value = value as? String { return value }
         if let value = value as? Int { return String(value) }
         return nil
+    }
+
+    static func arguments(from settings: AppSettings) -> [String] {
+        var arguments = [
+            "exec",
+            "--input-format", "stream-jsonrpc",
+            "--output-format", "stream-jsonrpc",
+        ]
+        if let autonomy = settings.autonomy.protocolValue {
+            arguments += ["--auto", autonomy]
+        }
+        if let model = settings.modelOverride.trimmedOrNil {
+            arguments += ["--model", model]
+        }
+        if let reasoning = settings.reasoning.protocolValue {
+            arguments += ["--reasoning-effort", reasoning]
+        }
+        return arguments
     }
 
     static func initializeParams(from settings: AppSettings) -> [String: Any] {

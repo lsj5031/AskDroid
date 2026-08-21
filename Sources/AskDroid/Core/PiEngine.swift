@@ -3,7 +3,11 @@ import Foundation
 actor PiEngine: EngineClient {
     private let launcher: any ProcessLaunching
     private let fileExists: @Sendable (String) -> Bool
-    private var activeProcess: (runID: UUID, process: any ProcessIO)?
+    /// The session established by `begin`. A new `begin` retires it — one
+    /// live CLI per engine.
+    private var activeHandle: SessionHandle?
+    /// Legacy one-shot runs keyed by run id so `cancel(runID:)` keeps working.
+    private var legacyRuns: [UUID: SessionHandle] = [:]
 
     init(
         launcher: any ProcessLaunching = FoundationProcessLauncher(),
@@ -13,17 +17,120 @@ actor PiEngine: EngineClient {
         self.fileExists = fileExists
     }
 
-    func cancel(runID: UUID) {
-        guard let active = activeProcess, active.runID == runID else { return }
-        if let abortPayload = try? JSONSerialization.data(withJSONObject: ["type": "abort"]),
-           let abortLine = String(data: abortPayload, encoding: .utf8)
-        {
-            try? active.process.write(abortLine)
+    func begin(
+        settings: AppSettings,
+        onEvent: @escaping @Sendable (EngineEvent) -> Void
+    ) async throws -> SessionHandle {
+        guard let executable = BinaryDiscovery.resolve(
+            engine: .pi,
+            override: settings.piPath,
+            fileExists: fileExists
+        ) else {
+            throw EngineError.binaryNotFound(.pi)
         }
-        active.process.terminate()
-        activeProcess = nil
+
+        let cwd = settings.resolvedWorkingDirectory
+        try FileManager.default.createDirectory(
+            atPath: cwd,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            atPath: settings.resolvedAnswersDirectory,
+            withIntermediateDirectories: true
+        )
+
+        if let stale = activeHandle {
+            activeHandle = nil
+            await stale.terminateProcess()
+        }
+
+        let config = EngineProcessRunner.Configuration(
+            engine: .pi,
+            initialActivity: "Opening a Pi session…",
+            initializeSession: { _, _ in
+                // Pi has no initialization handshake; the process accepts
+                // prompts as soon as it is running.
+            },
+            acceptTimeoutMessage: "Pi did not accept the prompt in time.",
+            turnTimeoutMessage: "Pi did not finish in 10 minutes.",
+            // Readiness is immediate; prompt acceptance is guarded by the
+            // per-turn timer instead.
+            isInitialAccepted: { _ in true },
+            isAuthError: { line in
+                line.localizedCaseInsensitiveContains("not authenticated")
+                    || line.localizedCaseInsensitiveContains("auth_unavailable")
+                    || line.localizedCaseInsensitiveContains("no auth available")
+                    || line.localizedCaseInsensitiveContains("invalid api key")
+                    || line.localizedCaseInsensitiveContains("missing api key")
+            },
+            handleLine: { [weak self] line, process, session, turn, turnEnded in
+                await self?.handle(
+                    line: line,
+                    process: process,
+                    session: session,
+                    turn: turn,
+                    turnEnded: turnEnded,
+                    onEvent: onEvent
+                )
+            },
+            composeTurnMessage: { process, session, turn in
+                let id = await session.registerRequest(as: .userMessage)
+                try process.write(try Self.encodeJSON(Self.promptParams(id: id, from: turn.request)))
+                onEvent(.log(turn.turnID, "prompt sent"))
+                onEvent(.activity(turn.turnID, "Waiting for Pi…"))
+            },
+            onTurnEnd: { _, _ in
+                // Engine-side bookkeeping (context stats) rides the runner's
+                // turnDidEnd hook.
+            },
+            onProcessExit: { _ in
+                // The handle owns exit bookkeeping; nothing engine-side to do.
+            }
+        )
+
+        let handle = SessionHandle(
+            engine: .pi,
+            settings: settings,
+            sink: onEvent,
+            config: config,
+            makeProcess: {
+                try self.launcher.launch(
+                    executable: executable,
+                    arguments: Self.arguments(from: settings),
+                    environment: EngineSupport.augmentedEnvironment(),
+                    cwd: cwd
+                )
+            }
+        )
+        activeHandle = handle
+        try await handle.open()
+        onEvent(.sessionReady(handle, model: nil))
+        return handle
     }
 
+    func interrupt(_ handle: SessionHandle) async {
+        if let line = try? Self.encodeJSON(["type": "abort"]) {
+            try? await handle.writeLine(line)
+        }
+        // No terminate(): abort stops the turn, the process keeps running.
+        await handle.interruptCurrentTurn()
+    }
+
+    func reset(_ handle: SessionHandle) async {
+        // Verified against the CLI: new_session clears context in-process,
+        // no relaunch needed.
+        if let line = try? Self.encodeJSON(["type": "new_session"]) {
+            try? await handle.writeLine(line)
+        }
+        await handle.clearConversationContext()
+    }
+
+    func close(_ handle: SessionHandle) async {
+        await handle.shutdown()
+        if activeHandle === handle { activeHandle = nil }
+    }
+
+    /// Legacy one-shot convenience: `begin` → one turn → `close`.
     func run(
         _ request: EngineRequest,
         runID: UUID = UUID(),
@@ -33,110 +140,29 @@ actor PiEngine: EngineClient {
         onEvent(.activity(runID, "Starting Pi…"))
         onEvent(.log(runID, "Looking for the pi CLI…"))
 
-        guard let executable = BinaryDiscovery.resolve(
-            engine: .pi,
-            override: request.settings.piPath,
-            fileExists: fileExists
-        ) else {
-            onEvent(.failed(runID, EngineError.binaryNotFound(Engine.pi).localizedDescription))
-            return
-        }
-        onEvent(.log(runID, "Using \(executable)"))
-
         do {
-            var arguments = [
-                "--mode", "rpc",
-                "--no-session",
-            ]
-            if let model = request.settings.modelOverride.trimmedOrNil {
-                arguments += ["--model", model]
-            }
-            if let thinking = request.settings.reasoning.piProtocolValue {
-                arguments += ["--thinking", thinking]
-            }
-
-            let cwd = request.settings.resolvedWorkingDirectory
-            try FileManager.default.createDirectory(
-                atPath: cwd,
-                withIntermediateDirectories: true
-            )
-            try FileManager.default.createDirectory(
-                atPath: request.settings.resolvedAnswersDirectory,
-                withIntermediateDirectories: true
-            )
-
-            let process = try launcher.launch(
-                executable: executable,
-                arguments: arguments,
-                environment: EngineSupport.augmentedEnvironment(),
-                cwd: cwd
-            )
-            if let stale = activeProcess {
-                stale.process.terminate()
-            }
-            activeProcess = (runID, process)
-
-            let config = EngineProcessRunner.Configuration(
-                engine: .pi,
-                initialActivity: "Opening a Pi session…",
-                sendInitialMessage: { process, _ in
-                    let promptPayload = Self.promptParams(from: request)
-                    let promptLine = try Self.encodeJSON(promptPayload)
-                    try process.write(promptLine)
-                    onEvent(.log(runID, "prompt sent"))
-                    onEvent(.activity(runID, "Waiting for Pi…"))
-                },
-                acceptTimeoutMessage: "Pi did not accept the prompt in time.",
-                turnTimeoutMessage: "Pi did not finish in 10 minutes.",
-                isInitialAccepted: { await $0.didAccept },
-                isAuthError: { line in
-                    line.localizedCaseInsensitiveContains("not authenticated")
-                        || line.localizedCaseInsensitiveContains("auth_unavailable")
-                        || line.localizedCaseInsensitiveContains("no auth available")
-                        || line.localizedCaseInsensitiveContains("invalid api key")
-                        || line.localizedCaseInsensitiveContains("missing api key")
-                },
-                handleLine: { [weak self] line, process, session, turn, turnEnded in
-                    await self?.handle(
-                        line: line,
-                        process: process,
-                        session: session,
-                        turn: turn,
-                        turnEnded: turnEnded,
-                        turnID: runID,
-                        onEvent: onEvent
-                    )
-                },
-                onTurnEnd: { _, _ in
-                    // Engine-side bookkeeping lands with the persistent lifecycle.
-                },
-                onProcessExit: { [weak self] _ in
-                    await self?.clearActiveProcess(runID: runID)
-                }
-            )
-
-            await EngineProcessRunner.run(process: process, request: request, turnID: runID, config: config, onEvent: onEvent)
-            if activeProcess?.runID == runID {
-                activeProcess = nil
-            }
+            let handle = try await begin(settings: request.settings, onEvent: onEvent)
+            legacyRuns[runID] = handle
+            await handle.send(request, turnID: runID, lifetime: .oneShot)
+            legacyRuns[runID] = nil
+            await close(handle)
         } catch is CancellationError {
-            if activeProcess?.runID == runID {
-                activeProcess?.process.terminate()
-                activeProcess = nil
-            }
             onEvent(.failed(runID, EngineError.cancelled.localizedDescription))
         } catch {
-            if activeProcess?.runID == runID {
-                activeProcess = nil
-            }
             onEvent(.failed(runID, error.localizedDescription))
         }
     }
 
-    private func clearActiveProcess(runID: UUID) {
-        if activeProcess?.runID == runID {
-            activeProcess = nil
+    /// Legacy cancel for one-shot runs: abort, then kill the process. The
+    /// abort-then-terminate race noted in plans/README.md only ever applied
+    /// here; persistent sessions use `interrupt(_:)`, which never terminates.
+    func cancel(runID: UUID) async {
+        guard let handle = legacyRuns[runID] else { return }
+        legacyRuns[runID] = nil
+        if let line = try? Self.encodeJSON(["type": "abort"]) {
+            try? await handle.writeLine(line)
         }
+        await handle.terminateProcess()
     }
 
     private func handle(
@@ -145,7 +171,6 @@ actor PiEngine: EngineClient {
         session: EngineSession,
         turn: TurnState,
         turnEnded: TurnEnder,
-        turnID: UUID,
         onEvent: @escaping @Sendable (EngineEvent) -> Void
     ) async {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -153,6 +178,22 @@ actor PiEngine: EngineClient {
               let data = trimmed.data(using: .utf8),
               let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         else { return }
+
+        let turnID = turn.turnID
+
+        // Session-scoped responses can arrive after the turn ended (context
+        // stats); dispatch them before the turn gates.
+        if json["type"] as? String == "response",
+           let command = json["command"] as? String,
+           command != "prompt"
+        {
+            switch command {
+            case "get_session_stats", "new_session", "abort":
+                return
+            default:
+                break // unknown commands fall through to the logged-failure path
+            }
+        }
 
         if await turn.lastError != nil { return }
         // The turn is over; ignore stragglers. The reader keeps running for
@@ -306,14 +347,11 @@ actor PiEngine: EngineClient {
         case "agent_settled":
             // The real turn boundary. `agent_end` above is only one low-level
             // run; retries and compaction may follow it before this point.
+            // The handle's endTurn performs the first-wins end and settles.
             if await turn.lastError == nil {
-                if await turn.end(.completed) {
-                    await turnEnded(turn, .completed)
-                }
+                await turnEnded(turn, .completed)
             } else {
-                if await turn.end(.failed) {
-                    await turnEnded(turn, .failed)
-                }
+                await turnEnded(turn, .failed)
             }
 
         case "extension_ui_request":
@@ -332,9 +370,23 @@ actor PiEngine: EngineClient {
         }
     }
 
-    static func promptParams(from request: EngineRequest) -> [String: Any] {
+    static func arguments(from settings: AppSettings) -> [String] {
+        var arguments = [
+            "--mode", "rpc",
+            "--no-session",
+        ]
+        if let model = settings.modelOverride.trimmedOrNil {
+            arguments += ["--model", model]
+        }
+        if let thinking = settings.reasoning.piProtocolValue {
+            arguments += ["--thinking", thinking]
+        }
+        return arguments
+    }
+
+    static func promptParams(id: String, from request: EngineRequest) -> [String: Any] {
         var params: [String: Any] = [
-            "id": "1",
+            "id": id,
             "type": "prompt",
             "message": request.prompt,
         ]

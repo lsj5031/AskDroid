@@ -1,14 +1,59 @@
 import Foundation
 
-/// A backend that can answer a one-shot question by driving a CLI process.
+/// A backend that can hold a multi-turn conversation by driving a CLI process.
+///
+/// The lifecycle is `begin` once per conversation, then any number of
+/// `send`/`interrupt`/`reset` rounds, then `close`. A turn ending is not a
+/// session ending: only `close` (or an unexpected process exit) retires the
+/// CLI process.
 protocol EngineClient: AnyObject, Sendable {
+    /// Launch the CLI and initialize a session. Idempotent per engine: a new
+    /// `begin` retires the previous session.
+    func begin(
+        settings: AppSettings,
+        onEvent: @escaping @Sendable (EngineEvent) -> Void
+    ) async throws -> SessionHandle
+
+    /// Run a new turn on an existing session. Returns when the turn settles;
+    /// the session stays usable.
+    func send(_ request: EngineRequest, turnID: UUID, to handle: SessionHandle) async
+
+    /// Stop the current turn. The session stays usable.
+    func interrupt(_ handle: SessionHandle) async
+
+    /// Clear conversation context without dropping the session where the
+    /// engine supports it.
+    func reset(_ handle: SessionHandle) async
+
+    /// Graceful shutdown.
+    func close(_ handle: SessionHandle) async
+
+    /// Legacy one-shot convenience: `begin` → one turn → `close`. Retained so
+    /// existing call sites and tests keep working; new code should hold a
+    /// `SessionHandle` instead.
     func run(
         _ request: EngineRequest,
         runID: UUID,
         onEvent: @escaping @Sendable (EngineEvent) -> Void
     ) async
 
+    /// Legacy cancel for one-shot `run`s: kills the process. Superseded by
+    /// `interrupt(_:)`, which ends the turn and keeps the session.
     func cancel(runID: UUID) async
+}
+
+extension EngineClient {
+    /// Runs a turn on an existing session. Identical for every engine — the
+    /// per-turn pipeline lives on the handle.
+    func send(_ request: EngineRequest, turnID: UUID, to handle: SessionHandle) async {
+        await handle.send(request, turnID: turnID)
+    }
+
+    /// Deliver input while a turn is streaming (plan 008 Phase 7). Engines
+    /// that gain steering override this.
+    func queue(_ request: EngineRequest, to handle: SessionHandle) async throws {
+        throw EngineError.failed("Steering isn't supported on this engine yet.")
+    }
 }
 
 enum Engine: String, CaseIterable, Identifiable, Sendable {
@@ -82,6 +127,16 @@ enum EngineEvent: Sendable {
     case log(UUID, String)
     case completed(UUID, EngineResult)
     case failed(UUID, String)
+    /// The turn stopped without completing; the session stays usable.
+    case interrupted(UUID)
+    /// Context-window fill reported by the engine after a turn.
+    case contextStats(used: Int, limit: Int)
+    /// Steering queue changes (plan 008 Phase 7).
+    case queueChanged([String])
+    /// The CLI process is gone. `nil` reason means we closed it ourselves.
+    case sessionEnded(String?)
+    /// A session was established and is ready for turns.
+    case sessionReady(SessionHandle, model: String?)
 }
 
 // Legacy typealiases for backwards compatibility
@@ -216,6 +271,16 @@ typealias TurnEnder = @Sendable (TurnState, TurnOutcome) async -> Void
 /// Lives as long as the CLI process. Session-scoped identity and negotiation
 /// state; nothing here describes a single turn.
 actor EngineSession {
+    /// What a claimed JSON-RPC request id was spent on, so responses can be
+    /// correlated now that ids are monotonic instead of hardcoded.
+    enum RequestKind {
+        case initialize
+        case userMessage
+        case interrupt
+        case contextStats
+        case closeSession
+    }
+
     let engine: Engine
     let settings: AppSettings
     private(set) var sessionID: String?
@@ -224,6 +289,7 @@ actor EngineSession {
     private(set) var didAccept = false
     private(set) var isClosed = false
     private(set) var nextRequestID = 1
+    private var pendingRequests: [String: RequestKind] = [:]
 
     init(engine: Engine, settings: AppSettings) {
         self.engine = engine
@@ -237,6 +303,21 @@ actor EngineSession {
     func claimRequestID() -> String {
         defer { nextRequestID += 1 }
         return String(nextRequestID)
+    }
+
+    /// Claims the next request id and remembers what it was for.
+    func registerRequest(as kind: RequestKind) -> String {
+        let id = claimRequestID()
+        pendingRequests[id] = kind
+        return id
+    }
+
+    func requestKind(for id: String) -> RequestKind? {
+        pendingRequests[id]
+    }
+
+    func fulfillRequest(id: String) {
+        pendingRequests[id] = nil
     }
 
     func setSessionID(_ id: String) {
@@ -257,6 +338,13 @@ actor EngineSession {
 
     func markClosed() {
         isClosed = true
+    }
+
+    /// Forgets conversation-scoped identity after an in-process reset (Pi's
+    /// `new_session`). Request ids stay monotonic so late responses can never
+    /// collide with new ones.
+    func resetContext() {
+        sessionID = nil
     }
 }
 
@@ -432,7 +520,9 @@ enum EngineProcessRunner {
     struct Configuration: Sendable {
         let engine: Engine
         let initialActivity: String
-        let sendInitialMessage: @Sendable (any ProcessIO, EngineSession) async throws -> Void
+        /// Sent once per session right after launch (droid's
+        /// `initialize_session`; Pi has no handshake).
+        let initializeSession: @Sendable (any ProcessIO, EngineSession) async throws -> Void
         // Session-scoped guard for initialization.
         let acceptTimeoutSeconds: Int
         let acceptTimeoutMessage: String
@@ -443,8 +533,14 @@ enum EngineProcessRunner {
         let turnTimeoutMessage: String
         let isAuthError: @Sendable (String) -> Bool
         let handleLine: LineHandler
+        /// Writes one turn's user message (droid `add_user_message`, Pi
+        /// `prompt`). Called after the initialization handshake is accepted.
+        let composeTurnMessage: @Sendable (any ProcessIO, EngineSession, TurnState) async throws -> Void
+        /// Bookkeeping fired on the process after every settled turn in a
+        /// persistent session (context-stats requests). Failures are ignored.
+        let turnDidEnd: (@Sendable (any ProcessIO, EngineSession) async -> Void)?
         /// Called by the engine's line handler when a turn reaches a terminal
-        /// state. The runner finalizes the turn and returns to idle — the
+        /// state. The handle finalizes the turn and returns to idle — the
         /// process keeps running.
         let onTurnEnd: TurnEnder
         /// Called once the process has exited and both readers have joined.
@@ -453,7 +549,7 @@ enum EngineProcessRunner {
         init(
             engine: Engine,
             initialActivity: String,
-            sendInitialMessage: @escaping @Sendable (any ProcessIO, EngineSession) async throws -> Void,
+            initializeSession: @escaping @Sendable (any ProcessIO, EngineSession) async throws -> Void,
             acceptTimeoutSeconds: Int = 25,
             acceptTimeoutMessage: String,
             turnTimeoutSeconds: Int = 600,
@@ -461,12 +557,14 @@ enum EngineProcessRunner {
             isInitialAccepted: @escaping @Sendable (EngineSession) async -> Bool,
             isAuthError: @escaping @Sendable (String) -> Bool,
             handleLine: @escaping LineHandler,
+            composeTurnMessage: @escaping @Sendable (any ProcessIO, EngineSession, TurnState) async throws -> Void,
+            turnDidEnd: (@Sendable (any ProcessIO, EngineSession) async -> Void)? = nil,
             onTurnEnd: @escaping TurnEnder,
             onProcessExit: @escaping @Sendable (_ status: Int32) async -> Void
         ) {
             self.engine = engine
             self.initialActivity = initialActivity
-            self.sendInitialMessage = sendInitialMessage
+            self.initializeSession = initializeSession
             self.acceptTimeoutSeconds = acceptTimeoutSeconds
             self.acceptTimeoutMessage = acceptTimeoutMessage
             self.turnTimeoutSeconds = turnTimeoutSeconds
@@ -474,13 +572,371 @@ enum EngineProcessRunner {
             self.isInitialAccepted = isInitialAccepted
             self.isAuthError = isAuthError
             self.handleLine = handleLine
+            self.composeTurnMessage = composeTurnMessage
+            self.turnDidEnd = turnDidEnd
             self.onTurnEnd = onTurnEnd
             self.onProcessExit = onProcessExit
         }
     }
+}
 
-    /// Resumes the awaiting runner exactly once, when the first of
-    /// {turn end, process exit} settles the current turn.
+/// A live, multi-turn conversation with one CLI process. Returned by
+/// `EngineClient.begin(settings:onEvent:)`; callers hold it and pass it back
+/// for every turn.
+///
+/// The handle owns the process-lifetime supervision that used to live in the
+/// one-shot runner: stdout/stderr readers that exit on EOF only, a death watch
+/// that classifies unexpected exits, and a per-turn pipeline (readiness gate,
+/// user message, timer, settlement, finalization). A turn ending is a protocol
+/// event; only `shutdown` — or the process itself dying — ends the session.
+actor SessionHandle {
+    /// One-shot runs terminate the process as soon as the turn settles (the
+    /// legacy `run(_:)` convenience); persistent sessions keep it alive for
+    /// the next turn.
+    enum TurnLifetime {
+        case persistent
+        case oneShot
+    }
+
+    let engine: Engine
+
+    private let settings: AppSettings
+    private let config: EngineProcessRunner.Configuration
+    private let sink: @Sendable (EngineEvent) -> Void
+    private let makeProcess: @Sendable () async throws -> any ProcessIO
+
+    private struct Connection {
+        let process: any ProcessIO
+        let state: EngineSession
+    }
+
+    private var connection: Connection?
+    private var readers: [Task<Void, Never>] = []
+    private var deathWatch: Task<Void, Never>?
+    private(set) var currentTurn: TurnState?
+    /// Most recent turn, kept after it ends so session-scoped traffic (late
+    /// RPC responses, context stats) still has somewhere to dispatch.
+    private var lastTurn: TurnState?
+    private var settler: TurnSettler?
+    private var turnTimer: Task<Void, Never>?
+    private(set) var lastExitStatus: Int32?
+    private(set) var didClose = false
+
+    init(
+        engine: Engine,
+        settings: AppSettings,
+        sink: @escaping @Sendable (EngineEvent) -> Void,
+        config: EngineProcessRunner.Configuration,
+        makeProcess: @escaping @Sendable () async throws -> any ProcessIO
+    ) {
+        self.engine = engine
+        self.settings = settings
+        self.sink = sink
+        self.config = config
+        self.makeProcess = makeProcess
+    }
+
+    // MARK: Accessors for engines
+
+    var process: (any ProcessIO)? { connection?.process }
+    var state: EngineSession? { connection?.state }
+
+    func writeLine(_ line: String) throws {
+        try connection?.process.write(line)
+    }
+
+    // MARK: Lifecycle
+
+    /// Launches the CLI, starts the process-lifetime readers and death watch,
+    /// and sends the engine's initialization handshake. Readiness is awaited
+    /// per turn (see `send`) so cancelling never blocks `begin`.
+    func open() async throws {
+        guard connection == nil else { return }
+        lastExitStatus = nil
+        let process = try await makeProcess()
+        let state = EngineSession(engine: engine, settings: settings)
+        connection = Connection(process: process, state: state)
+        startSupervision(process: process, state: state)
+        do {
+            try await config.initializeSession(process, state)
+        } catch {
+            process.terminate()
+            throw error
+        }
+    }
+
+    /// Runs one turn to completion. Returns when the turn settles; unless
+    /// `lifetime` is `.oneShot`, the process stays alive for the next turn.
+    func send(_ request: EngineRequest, turnID: UUID, lifetime: TurnLifetime = .persistent) async {
+        if didClose {
+            sink(.failed(turnID, EngineError.failed("The \(engine.title) session is closed.").localizedDescription))
+            return
+        }
+
+        // A dead connection is replaced before the turn starts so a crash on
+        // turn N doesn't poison turn N+1. `readersAreClosed` is set by the
+        // death watch after `waitUntilExit` returns, so it proves the process
+        // is gone even if `lastExitStatus` hasn't landed yet.
+        if connection == nil || lastExitStatus != nil || (connection?.process.readersAreClosed ?? true) {
+            guard lifetime == .persistent else {
+                sink(.failed(turnID, EngineError.failed("The \(engine.title) session has exited.").localizedDescription))
+                return
+            }
+            do {
+                try await open()
+            } catch {
+                sink(.failed(turnID, error.localizedDescription))
+                return
+            }
+        }
+        guard let conn = connection else {
+            sink(.failed(turnID, "Could not start a \(engine.title) session."))
+            return
+        }
+
+        sink(.activity(turnID, config.initialActivity))
+        sink(.log(turnID, "cwd \(request.settings.resolvedWorkingDirectory)"))
+
+        let turn = TurnState(turnID: turnID, request: request, startedAt: Date())
+        currentTurn = turn
+        lastTurn = turn
+        let settle = TurnSettler()
+        settler = settle
+
+        let timeoutSeconds = config.turnTimeoutSeconds
+        let timer = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(timeoutSeconds))
+            guard !Task.isCancelled else { return }
+            await self?.timeOut(turn)
+        }
+        turnTimer = timer
+
+        let ready = await waitForReady(state: conn.state, process: conn.process, turn: turn)
+        if ready, !(await turn.isEnded) {
+            do {
+                try await config.composeTurnMessage(conn.process, conn.state, turn)
+            } catch {
+                await turn.mark(error: error.localizedDescription)
+                await endTurn(turn, .failed)
+            }
+        }
+
+        await settle.wait()
+        timer.cancel()
+        turnTimer = nil
+
+        if lifetime == .oneShot {
+            // Legacy epilogue: the run owns the process, so shut it down now
+            // that the turn has settled.
+            conn.process.terminate()
+            if let deathWatch { _ = await deathWatch.value }
+        } else if let turnDidEnd = config.turnDidEnd {
+            // Post-turn bookkeeping (context stats). Failures are noise.
+            await turnDidEnd(conn.process, conn.state)
+        }
+
+        await finalize(turn, state: conn.state)
+
+        if currentTurn?.turnID == turnID {
+            currentTurn = nil
+            settler = nil
+        }
+    }
+
+    /// Ends the in-flight turn as `.interrupted`. The session — and the
+    /// process — stay usable for the next turn.
+    func interruptCurrentTurn() async {
+        guard let turn = currentTurn, await !turn.isEnded else { return }
+        await endTurn(turn, .interrupted)
+    }
+
+    /// Forgets conversation-scoped identity after an in-process reset.
+    func clearConversationContext() async {
+        await connection?.state.resetContext()
+    }
+
+    /// Tears the current process down and launches a fresh one in its place.
+    /// Used by engines whose reset semantics require a new process (droid).
+    func relaunch() async throws {
+        await shutdown()
+        didClose = false
+        try await open()
+    }
+
+    /// Graceful shutdown: stops timers, terminates the process, joins the
+    /// death watch.
+    func shutdown() async {
+        turnTimer?.cancel()
+        turnTimer = nil
+        currentTurn = nil
+        settler = nil
+        didClose = true
+        guard let conn = connection else { return }
+        connection = nil
+        conn.process.terminate()
+        if let deathWatch { _ = await deathWatch.value }
+        readers = []
+        deathWatch = nil
+    }
+
+    /// Immediate teardown without graceful-close bookkeeping. The legacy
+    /// `cancel(runID:)` path uses this; the death watch classifies the turn.
+    func terminateProcess() async {
+        didClose = true
+        connection?.process.terminate()
+        connection = nil
+    }
+
+    // MARK: Turn pipeline
+
+    /// Waits for the engine's initialization handshake. Returns false when
+    /// the turn was ended while waiting (cancel, process death, timeout) —
+    /// the caller then skips composing the turn message.
+    private func waitForReady(state: EngineSession, process: any ProcessIO, turn: TurnState) async -> Bool {
+        if await config.isInitialAccepted(state) { return true }
+        let deadline = Date().addingTimeInterval(TimeInterval(config.acceptTimeoutSeconds))
+        while !(await config.isInitialAccepted(state)) {
+            if await turn.isEnded { return false }
+            if process.readersAreClosed || lastExitStatus != nil { return false }
+            if Date() >= deadline {
+                await turn.mark(error: config.acceptTimeoutMessage)
+                process.terminate()
+                await endTurn(turn, .failed)
+                return false
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return true
+    }
+
+    private func timeOut(_ turn: TurnState) async {
+        guard await !turn.isEnded else { return }
+        await turn.mark(error: config.turnTimeoutMessage)
+        await endTurn(turn, .failed)
+    }
+
+    /// The `TurnEnder` implementation. The first terminal state wins the
+    /// outcome, but losing that race must never prevent settlement: whenever
+    /// a terminal outcome is reported for this handle's turn, the waiting
+    /// `send` wakes up. Only the winner drives `onTurnEnd` bookkeeping.
+    func endTurn(_ turn: TurnState, _ outcome: TurnOutcome) async {
+        let wonRace = await turn.end(outcome)
+        guard currentTurn === turn || lastTurn === turn else { return }
+        if wonRace {
+            await config.onTurnEnd(turn, outcome)
+        }
+        settler?.settle()
+    }
+
+    private func finalize(_ turn: TurnState, state: EngineSession) async {
+        guard let outcome = await turn.outcome else { return }
+        switch outcome {
+        case .completed:
+            await EngineSupport.emitCompletion(
+                session: state,
+                turn: turn,
+                turnID: turn.turnID,
+                engine: engine,
+                onEvent: sink
+            )
+        case .failed:
+            let message = (await turn.lastError) ?? EngineError.failed("The turn ended without a result.").localizedDescription
+            sink(.failed(turn.turnID, message))
+        case .interrupted:
+            sink(.interrupted(turn.turnID))
+        }
+    }
+
+    // MARK: Process supervision
+
+    private func startSupervision(process: any ProcessIO, state: EngineSession) {
+        let turnEnder: TurnEnder = { [weak self] turn, outcome in
+            await self?.endTurn(turn, outcome)
+        }
+        let stdoutTask = Task.detached { [weak self] in
+            let reader = LineReader()
+            while true {
+                let data = process.standardOutput.availableData
+                if data.isEmpty { break }
+                for line in reader.push(data) {
+                    await self?.route(line, process: process, state: state, turnEnder: turnEnder, isStdout: true)
+                }
+            }
+        }
+        let stderrTask = Task.detached { [weak self] in
+            let reader = LineReader()
+            while true {
+                let data = process.standardError.availableData
+                if data.isEmpty { break }
+                for line in reader.push(data) {
+                    await self?.route(line, process: process, state: state, turnEnder: turnEnder, isStdout: false)
+                }
+            }
+        }
+        readers = [stdoutTask, stderrTask]
+        deathWatch = Task.detached { [weak self] in
+            let status = await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    continuation.resume(returning: process.waitUntilExit())
+                }
+            }
+            process.closeReaders()
+            _ = await stdoutTask.result
+            _ = await stderrTask.result
+            await self?.processDidExit(status)
+        }
+    }
+
+    private func route(
+        _ line: String,
+        process: any ProcessIO,
+        state: EngineSession,
+        turnEnder: TurnEnder,
+        isStdout: Bool
+    ) async {
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        if isStdout {
+            // `lastTurn` keeps session-scoped traffic dispatchable between
+            // turns; handlers gate turn-scoped work on `turn.isEnded`.
+            guard let turn = currentTurn ?? lastTurn else { return }
+            await config.handleLine(trimmed, process, state, turn, turnEnder)
+        } else {
+            guard let turn = currentTurn else { return }
+            await turn.appendLog(trimmed)
+            sink(.log(turn.turnID, trimmed))
+            if config.isAuthError(trimmed) {
+                await turn.mark(error: EngineError.notAuthenticated(engine).localizedDescription)
+                process.terminate()
+            }
+        }
+    }
+
+    private func processDidExit(_ status: Int32) async {
+        lastExitStatus = status
+        // An exit that arrives before the protocol ended the turn classifies it.
+        if let turn = currentTurn, await !turn.isEnded {
+            if await turn.lastError != nil {
+                await endTurn(turn, .failed)
+            } else if status == SIGTERM || status == SIGKILL {
+                await turn.mark(error: EngineError.cancelled.localizedDescription)
+                await endTurn(turn, .failed)
+            } else if status != 0 {
+                await turn.mark(error: "\(engine.title) exited with status \(status).")
+                await endTurn(turn, .failed)
+            } else {
+                await endTurn(turn, .completed)
+            }
+        }
+        await config.onProcessExit(status)
+        // An exit always wakes a waiting send, even if the protocol had
+        // already settled the turn.
+        settler?.settle()
+        sink(.sessionEnded(didClose ? nil : "The \(engine.title) process exited."))
+    }
+
+    /// Resumes the awaiting turn exactly once, when the first of
+    /// {turn end, process exit} settles it.
     private final class TurnSettler: @unchecked Sendable {
         private let lock = NSLock()
         private var continuation: CheckedContinuation<Void, Never>?
@@ -506,174 +962,6 @@ enum EngineProcessRunner {
             settled = true
             continuation?.resume()
             continuation = nil
-        }
-    }
-
-    static func run(
-        process: any ProcessIO,
-        request: EngineRequest,
-        turnID: UUID,
-        config: Configuration,
-        onEvent: @escaping @Sendable (EngineEvent) -> Void
-    ) async {
-        let session = EngineSession(engine: config.engine, settings: request.settings)
-        let turn = TurnState(turnID: turnID, request: request, startedAt: Date())
-
-        onEvent(.activity(turnID, config.initialActivity))
-        onEvent(.log(turnID, "cwd \(request.settings.resolvedWorkingDirectory)"))
-
-        let settler = TurnSettler()
-        let engineTurnEnd = config.onTurnEnd
-        let engineProcessExit = config.onProcessExit
-
-        // A turn ends because the protocol said so — never because the process
-        // died. First terminal state wins.
-        let endTurn: TurnEnder = { turn, outcome in
-            guard await turn.end(outcome) else { return }
-            await engineTurnEnd(turn, outcome)
-            settler.settle()
-        }
-
-        let handleProcessExit: @Sendable (Int32) async -> Void = { status in
-            // The exit arrived before the protocol ended the turn: classify it.
-            if await !turn.isEnded {
-                if await turn.lastError != nil {
-                    await turn.end(.failed)
-                } else if status == SIGTERM || status == SIGKILL {
-                    await turn.mark(error: EngineError.cancelled.localizedDescription)
-                    await turn.end(.failed)
-                } else if status != 0 {
-                    await turn.mark(error: "\(config.engine.title) exited with status \(status).")
-                    await turn.end(.failed)
-                } else {
-                    await turn.end(.completed)
-                }
-            }
-            await engineProcessExit(status)
-            settler.settle()
-        }
-
-        do {
-            try await config.sendInitialMessage(process, session)
-        } catch {
-            await turn.mark(error: error.localizedDescription)
-            process.terminate()
-        }
-
-        // Session-scoped: guards initialization only.
-        let acceptTimeout = Task {
-            try? await Task.sleep(for: .seconds(config.acceptTimeoutSeconds))
-            guard !Task.isCancelled else { return }
-            if await !config.isInitialAccepted(session), await !turn.isEnded {
-                await turn.mark(error: config.acceptTimeoutMessage)
-                process.terminate()
-            }
-        }
-
-        // Per-turn timer: started with the turn, cancelled at turn end.
-        let turnTimer = Task {
-            try? await Task.sleep(for: .seconds(config.turnTimeoutSeconds))
-            guard !Task.isCancelled else { return }
-            if await !turn.isEnded {
-                await turn.mark(error: config.turnTimeoutMessage)
-                await endTurn(turn, .failed)
-            }
-        }
-
-        // Process-lifetime reader: exits on EOF only. Lines that arrive after
-        // the turn ended are ignored by the handlers, not by the reader.
-        // NOTE: no readersAreClosed check here — availableData must be free
-        // to drain everything already buffered, or a closeReaders() racing a
-        // live stream would silently drop protocol lines.
-        let stdoutTask = Task.detached {
-            let reader = LineReader()
-            while true {
-                let data = process.standardOutput.availableData
-                if data.isEmpty { break }
-                for line in reader.push(data) {
-                    await config.handleLine(line, process, session, turn, endTurn)
-                }
-            }
-        }
-
-        let stderrTask = Task.detached {
-            let reader = LineReader()
-            while true {
-                let data = process.standardError.availableData
-                if data.isEmpty { break }
-                for line in reader.push(data) {
-                    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !trimmed.isEmpty else { continue }
-                    await turn.appendLog(trimmed)
-                    onEvent(.log(turnID, trimmed))
-                    if config.isAuthError(trimmed) {
-                        await turn.mark(error: EngineError.notAuthenticated(config.engine).localizedDescription)
-                        process.terminate()
-                    }
-                }
-            }
-        }
-
-        // Death-watch instead of completion-wait: reports unexpected exit and
-        // joins the readers once the pipes are done.
-        let deathWatch = Task.detached {
-            let status = await withCheckedContinuation { continuation in
-                DispatchQueue.global(qos: .userInitiated).async {
-                    continuation.resume(returning: process.waitUntilExit())
-                }
-            }
-            process.closeReaders()
-            _ = await stdoutTask.result
-            _ = await stderrTask.result
-            await handleProcessExit(status)
-        }
-
-        // The turn — not the process — is the unit of completion.
-        await settler.wait()
-
-        acceptTimeout.cancel()
-        turnTimer.cancel()
-
-        if await turn.outcome == nil, Task.isCancelled {
-            await turn.mark(error: EngineError.cancelled.localizedDescription)
-            await turn.end(.failed)
-        }
-
-        // Legacy one-shot epilogue: the run owns the process, so shut it down
-        // now that the turn has settled. The persistent lifecycle (Phase 3+)
-        // replaces this with an explicit close().
-        process.terminate()
-        _ = await deathWatch.value
-
-        await finalizeTurn(
-            turn: turn,
-            session: session,
-            turnID: turnID,
-            engine: config.engine,
-            onEvent: onEvent
-        )
-    }
-
-    private static func finalizeTurn(
-        turn: TurnState,
-        session: EngineSession,
-        turnID: UUID,
-        engine: Engine,
-        onEvent: @escaping @Sendable (EngineEvent) -> Void
-    ) async {
-        guard let outcome = await turn.outcome else { return }
-        switch outcome {
-        case .completed:
-            await EngineSupport.emitCompletion(
-                session: session,
-                turn: turn,
-                turnID: turnID,
-                engine: engine,
-                onEvent: onEvent
-            )
-        case .failed, .interrupted:
-            let message = (await turn.lastError) ?? EngineError.failed("The turn ended without a result.").localizedDescription
-            onEvent(.failed(turnID, message))
         }
     }
 }

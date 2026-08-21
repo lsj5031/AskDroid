@@ -1200,8 +1200,8 @@ final class PiEngineStateMachineTests: XCTestCase {
             images: [image],
             settings: Self.makeSettings()
         )
-        let params = PiEngine.promptParams(from: request)
-        XCTAssertEqual(params["id"] as? String, "1")
+        let params = PiEngine.promptParams(id: "7", from: request)
+        XCTAssertEqual(params["id"] as? String, "7")
         XCTAssertEqual(params["type"] as? String, "prompt")
         XCTAssertEqual(params["message"] as? String, "what is in this?")
         let images = params["images"] as? [[String: Any]]
