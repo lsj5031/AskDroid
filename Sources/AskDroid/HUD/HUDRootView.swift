@@ -275,8 +275,13 @@ struct ExpandedHUD: View {
     }
 
     private var header: some View {
-        HStack(spacing: 10) {
+        // Top-aligned so the title line sits at a fixed y: the dot tracks it
+        // instead of shifting when the secondary line's presence changes the
+        // header height (a centered row would move the title, not the dot).
+        // The 4 pt optically centers the 8 pt dot on the 13 pt title line.
+        HStack(alignment: .top, spacing: 10) {
             StatusDot(phase: session.phase)
+                .padding(.top, 4)
             VStack(alignment: .leading, spacing: 1) {
                 Text(HeaderLines.primary(
                     isSettingsOpen: session.isSettingsOpen,

@@ -4,20 +4,43 @@ import SwiftUI
 struct StatusDot: View {
     let phase: AskSession.Phase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var pulsing = false
 
     var body: some View {
         Circle()
             .fill(color)
             .frame(width: 8, height: 8)
-            .opacity(phase == .running && !reduceMotion ? 0.45 : 1)
-            .animation(phase == .running && !reduceMotion ? .easeInOut(duration: 0.8).repeatForever() : .default, value: phase)
+            .opacity(pulsing ? 0.45 : 1)
+            .onAppear { syncPulse() }
+            .onChange(of: phase) { _, _ in syncPulse() }
+            .onChange(of: reduceMotion) { _, _ in syncPulse() }
+    }
+
+    /// Pulse only while a turn runs and motion is allowed. Driven from
+    /// explicit state instead of `.animation(_:value:)` so the repeatForever
+    /// is genuinely cancelled when the phase stops being `.running` — the
+    /// implicit form is notorious for outliving its trigger and keeping the
+    /// pulse fighting the layout after completion.
+    private func syncPulse() {
+        let shouldPulse = phase == .running && !reduceMotion
+        if shouldPulse {
+            withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) {
+                pulsing = true
+            }
+        } else {
+            withAnimation(.easeOut(duration: 0.2)) {
+                pulsing = false
+            }
+        }
     }
 
     private var color: Color {
         switch phase {
         case .running: Theme.accent
-        case .completed: Theme.success
         case .failed: Theme.danger
+        // .completed and .interrupted both mean "idle, ask me something";
+        // the compact pill already shows a checkmark for completion, so the
+        // dot stays neutral to match DESIGN.md ("amber pulse while running").
         default: Theme.mute
         }
     }
