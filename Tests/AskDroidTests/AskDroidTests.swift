@@ -1359,12 +1359,31 @@ final class AskSessionTests: XCTestCase {
         )
     }
 
+    /// Every launcher handed to `makeSession`, so teardown can release the
+    /// threads its processes are holding.
+    private var launchers: [MockLauncher] = []
+
     override func tearDown() {
+        // A live session parks three OS threads: two readers blocked in
+        // `FileHandle.availableData` and the death watch blocked in
+        // `waitUntilExit`. They unblock only on pipe EOF and process exit, so
+        // a session left open at test end leaks all three. The dispatch pool
+        // is finite: leak enough of them and a later test can no longer get a
+        // thread to read its own process, which reads as an unrelated hang.
+        for launcher in launchers {
+            for process in launcher.processes {
+                process.closeStdout()
+                process.closeStderr()
+                process.terminate()
+            }
+        }
+        launchers = []
         AskLog.setDirectoryOverrideForTesting(nil)
         super.tearDown()
     }
 
     private func makeSession(launcher: MockLauncher, engine: Engine = .droid) -> AskSession {
+        launchers.append(launcher)
         var settings = AppSettings.default
         settings.engine = engine
         settings.droidPath = "/tmp/droid"
@@ -1544,6 +1563,39 @@ final class AskSessionTests: XCTestCase {
         XCTAssertEqual(session.answer, "Answer two", "mirror should show the newest turn")
         XCTAssertEqual(launcher.count, 1, "follow-up relaunched the CLI")
         XCTAssertFalse(process.terminated)
+    }
+
+    func testFailedTurnRestoresImagesToComposer() async {
+        // A failed turn consumed the composer's images; the next attempt
+        // (typed follow-up or "Try again") must not silently drop them.
+        let launcher = MockLauncher()
+        let session = makeSession(launcher: launcher)
+        session.isExpanded = true
+        let image = AttachedImage(
+            id: UUID(),
+            data: Data([0x89, 0x50, 0x4E, 0x47]),
+            mediaType: "image/png",
+            filename: "diagram.png"
+        )
+        session.attach(images: [image])
+        session.prompt = "explain this"
+        session.submit()
+
+        _ = await waitFor { launcher.count >= 1 }
+        let process = launcher.processes[0]
+        feedDroidInit(process)
+        _ = await waitForWritten(process, contains: "add_user_message")
+        XCTAssertTrue(session.images.isEmpty, "composer should empty on submit")
+
+        // Fail the turn (droid reports agent_turn_completed with reason error).
+        process.feedStdout(#"{"jsonrpc":"2.0","method":"droid.session_notification","params":{"type":"error","message":"Connection error."}}"#)
+        process.feedStdout(#"{"jsonrpc":"2.0","method":"droid.session_notification","params":{"type":"agent_turn_completed","reason":"error","durationMs":5,"tokenUsage":{"inputTokens":0,"outputTokens":0}}}"#)
+        _ = await waitForSession { session.phase == .failed }
+
+        XCTAssertEqual(session.transcript.first?.status, .failed)
+        XCTAssertEqual(session.transcript.first?.images, [image], "failed turn keeps its images")
+        XCTAssertEqual(session.images, [image], "failed turn must restore its images to the composer")
+        XCTAssertEqual(session.prompt, "", "prompt stays cleared; only images are restored")
     }
 
     func testInterruptLeavesSessionUsableForNextTurn() async {
@@ -1854,13 +1906,55 @@ final class AskSessionTests: XCTestCase {
         XCTAssertTrue(session.pending.allSatisfy { $0.mode == .steering })
 
         // Settling delivers steered input into the finished turn; leftover
-        // steered chips clear and no follow-up turn auto-sends.
+        // steered chips clear and no follow-up turn auto-sends. The delta is
+        // required: a turn that settles without one has an empty answer,
+        // which the session reports as a failure, so `.completed` would never
+        // arrive and the wait below would burn its whole timeout instead.
+        process.feedStdout(#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"answer"}}"#)
         process.feedStdout(#"{"type":"agent_settled"}"#)
-        _ = await waitForSession { session.transcript[0].status == .completed }
-        _ = await waitForSession { session.pending.isEmpty }
+        let settled = await waitForSession { session.transcript[0].status == .completed }
+        XCTAssertTrue(settled, "steered turn never completed")
+        let chipsCleared = await waitForSession { session.pending.isEmpty }
+        XCTAssertTrue(chipsCleared, "steered chips must clear once the turn settles")
         XCTAssertEqual(session.transcript.count, 1)
         let promptsAfterSettle = writtenCount(process, containing: #""type":"prompt""#)
         XCTAssertEqual(promptsAfterSettle, 2, "settle must not re-send steered messages")
+    }
+
+    func testSteerAndQueuePostComposerReset() async {
+        // The steer/queue path consumes the prompt but must also tell the
+        // AppKit editor to clear: PromptEditor.updateNSView refuses to sync
+        // a *focused* field, and the field is focused right after typing, so
+        // without the notification the typed text stays visible in the box.
+        let launcher = MockLauncher()
+        let session = makeSession(launcher: launcher, engine: .pi)
+        session.isExpanded = true
+        session.prompt = "long running question"
+        session.submit()
+
+        _ = await waitFor { launcher.count >= 1 }
+        let process = launcher.processes[0]
+        _ = await waitForWritten(process, contains: #""type":"prompt""#)
+        process.feedStdout(#"{"id":"1","type":"response","command":"prompt","success":true}"#)
+        _ = await waitForSession { session.phase == .running }
+
+        var resets = 0
+        let token = NotificationCenter.default.addObserver(
+            forName: .askDroidResetComposer, object: nil, queue: .main
+        ) { _ in resets += 1 }
+        defer { NotificationCenter.default.removeObserver(token) }
+
+        // Steer (Pi's engine default while a turn runs).
+        session.prompt = "steer me"
+        session.submit()
+        XCTAssertTrue(session.prompt.isEmpty, "steer must consume the prompt")
+        XCTAssertEqual(resets, 1, "steer must post .askDroidResetComposer so the focused field clears")
+
+        // Explicit queue intent also consumes the prompt.
+        session.prompt = "queue me"
+        session.submit(.queue)
+        XCTAssertTrue(session.prompt.isEmpty, "queue must consume the prompt")
+        XCTAssertEqual(resets, 2, "queue must post .askDroidResetComposer too")
     }
 
     func testExplicitQueueIntentHoldsOnWireEngine() async {
@@ -1884,14 +1978,18 @@ final class AskSessionTests: XCTestCase {
         XCTAssertEqual(pendingTexts(session), ["hold this for later"])
         XCTAssertEqual(session.pending.first?.mode, .queued)
 
-        let sawHold = await waitForWritten(process, contains: "hold this for later")
+        // Proving absence costs the whole timeout, so keep it short: the wire
+        // write would happen within a poll or two of submit if it happened.
+        let sawHold = await waitForWritten(process, contains: "hold this for later", timeoutSeconds: 0.3)
         XCTAssertFalse(sawHold, "queued intent leaked to the wire mid-turn")
         XCTAssertFalse(
             process.written.joined().contains(#""streamingBehavior""#),
             "queued intent must not steer"
         )
 
-        // Settle drains the held message as a proper next turn.
+        // Settle drains the held message as a proper next turn. Turn one needs
+        // a delta so it completes rather than failing as an empty answer.
+        process.feedStdout(#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"first answer"}}"#)
         process.feedStdout(#"{"type":"agent_settled"}"#)
         let sawSecondPrompt = await waitForSession { writtenCount(process, containing: #""type":"prompt""#) >= 2 }
         XCTAssertTrue(sawSecondPrompt, "queued message never auto-sent")
@@ -1900,8 +1998,10 @@ final class AskSessionTests: XCTestCase {
         XCTAssertEqual(session.transcript[1].question, "hold this for later")
         XCTAssertEqual(session.transcript[1].status, .running)
         process.feedStdout(#"{"id":"2","type":"response","command":"prompt","success":true}"#)
+        process.feedStdout(#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"second answer"}}"#)
         process.feedStdout(#"{"type":"agent_settled"}"#)
-        _ = await waitForSession { session.transcript[1].status == .completed }
+        let secondSettled = await waitForSession { session.transcript[1].status == .completed }
+        XCTAssertTrue(secondSettled, "auto-sent turn never completed")
     }
 
     func testDroidSteerIntentFallsBackToClientQueue() async {
@@ -2076,6 +2176,85 @@ final class AskSessionTests: XCTestCase {
         XCTAssertEqual(session.transcript[1].answer, "answer two")
         XCTAssertTrue(session.pending.isEmpty)
         XCTAssertEqual(launcher.count, 1, "auto-send relaunched the CLI")
+    }
+
+    func testQueuedMessagePreservesImagesAcrossSettle() async {
+        // A message typed while a turn streams must carry its images into
+        // the auto-sent follow-up. Without the images field on
+        // PendingMessage the queued path discards them and the next turn
+        // sends text only — worst case asking the agent to “look at the
+        // attached image(s)” that were never attached.
+        let launcher = MockLauncher()
+        let session = makeSession(launcher: launcher)
+        session.isExpanded = true
+        session.prompt = "long running question"
+        session.submit()
+
+        _ = await waitFor { launcher.count >= 1 }
+        let process = launcher.processes[0]
+        feedDroidInit(process)
+        _ = await waitForWritten(process, contains: "add_user_message")
+
+        let image = AttachedImage(
+            id: UUID(),
+            data: Data([0x89, 0x50, 0x4E, 0x47]),
+            mediaType: "image/png",
+            filename: "diagram.png"
+        )
+        session.attach(images: [image])
+        session.prompt = "explain this diagram"
+        session.submit(.queue)
+        XCTAssertTrue(session.images.isEmpty, "composer should empty once queued")
+        XCTAssertEqual(pendingTexts(session), ["explain this diagram"])
+        XCTAssertEqual(session.pending.first?.images, [image], "queued message must retain its images")
+
+        // Settle drains the queued message as turn 2 — the images must
+        // travel into the new turn's request, not vanish.
+        feedDroidTurn(process, delta: "answer one")
+        let sawSecond = await waitForSession { writtenCount(process, containing: "add_user_message") >= 2 }
+        XCTAssertTrue(sawSecond, "queued message never auto-sent")
+        XCTAssertEqual(session.transcript.count, 2)
+        XCTAssertEqual(session.transcript[1].question, "explain this diagram")
+        XCTAssertEqual(session.transcript[1].images, [image], "follow-up turn lost the queued images")
+
+        feedDroidTurn(process, delta: "answer two")
+        _ = await waitForSession { session.transcript[1].status == .completed }
+    }
+
+    func testQueuedImageOnlyMessageUsesPlaceholderPrompt() async {
+        // Attaching an image with no text stores the placeholder prompt so
+        // the turn is sent asking the agent to look at images that ARE
+        // attached — not the old bug where the placeholder survived but
+        // the images were dropped.
+        let launcher = MockLauncher()
+        let session = makeSession(launcher: launcher)
+        session.isExpanded = true
+        session.prompt = "long running question"
+        session.submit()
+
+        _ = await waitFor { launcher.count >= 1 }
+        let process = launcher.processes[0]
+        feedDroidInit(process)
+        _ = await waitForWritten(process, contains: "add_user_message")
+
+        let image = AttachedImage(
+            id: UUID(),
+            data: Data([0x89, 0x50, 0x4E, 0x47]),
+            mediaType: "image/png",
+            filename: "photo.png"
+        )
+        session.attach(images: [image])
+        session.submit(.queue)
+        XCTAssertEqual(session.pending.first?.text, "Look at the attached image(s).")
+        XCTAssertEqual(session.pending.first?.images, [image])
+
+        feedDroidTurn(process, delta: "answer")
+        _ = await waitForSession { session.transcript.count == 2 }
+        XCTAssertEqual(session.transcript[1].question, "Look at the attached image(s).")
+        XCTAssertEqual(session.transcript[1].images, [image])
+
+        feedDroidTurn(process, delta: "done")
+        _ = await waitForSession { session.transcript[1].status == .completed }
     }
 
     func testInterruptKeepsPendingMessageQueuedUntilSettle() async {

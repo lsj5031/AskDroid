@@ -77,6 +77,10 @@ struct PendingMessage: Identifiable, Equatable {
     let id: UUID
     var text: String
     var mode: Mode
+    /// Images attached with the message. Stored here because the queued
+    /// path discards its request — without this the images would be lost
+    /// and the follow-up would send text only.
+    var images: [AttachedImage]
 }
 
 @MainActor
@@ -165,8 +169,11 @@ final class AskSession: ObservableObject {
     /// begins a fresh session.
     private var activeHandle: SessionHandle?
     private var isBeginningSession = false
-    /// Retained across an idle close; resumption across relaunches is a
-    /// documented follow-up plan.
+    /// Retained across an idle close. **Write-only in practice** — the only
+    /// reader is the log line in `closeIdleSession`. Session resumption is a
+    /// documented follow-up (plan 008, “Session resumption across app
+    /// restarts”); until that lands this value is never reattached, so don't
+    /// assume a follow-up turn reuses it.
     private var retainedSessionID: String?
     // Conversation archive state (plan 008 Phase 8). The archive is one file
     // per conversation, rewritten as turns complete.
@@ -381,10 +388,16 @@ final class AskSession: ObservableObject {
         pending.append(PendingMessage(
             id: UUID(),
             text: request.prompt,
-            mode: wireSteer ? .steering : .queued
+            mode: wireSteer ? .steering : .queued,
+            images: request.images
         ))
         prompt = ""
         images = []
+        // The AppKit editor refuses to sync a *focused* field (updateNSView
+        // skips it), and the field is focused right after typing — so without
+        // this the consumed text would stay visible in the box. Same explicit
+        // clear that resetComposer and startNewConversation use.
+        NotificationCenter.default.post(name: .askDroidResetComposer, object: nil)
         guard wireSteer else { return }
         Task { [client, weak self] in
             do {
@@ -398,6 +411,9 @@ final class AskSession: ObservableObject {
                     }
                     prompt = prompt.isEmpty ? request.prompt : prompt + "\n" + request.prompt
                     notice = error.localizedDescription
+                    // The field is still focused, so updateNSView won't sync
+                    // the restored text on its own; tell it to show it.
+                    NotificationCenter.default.post(name: .askDroidResetComposer, object: nil)
                 }
             }
         }
@@ -411,6 +427,7 @@ final class AskSession: ObservableObject {
         guard let next = pending.first(where: { $0.mode == .queued }) else { return }
         pending.removeAll { $0.id == next.id }
         prompt = next.text
+        images = next.images
         submit()
     }
 
@@ -428,7 +445,7 @@ final class AskSession: ObservableObject {
                 claimed.insert(existing.id)
                 steered.append(existing)
             } else {
-                steered.append(PendingMessage(id: UUID(), text: text, mode: .steering))
+                steered.append(PendingMessage(id: UUID(), text: text, mode: .steering, images: []))
             }
         }
         let queued = pending.filter { $0.mode == .queued }
@@ -545,6 +562,11 @@ final class AskSession: ObservableObject {
 
     private func closeIdleSession() async {
         guard let handle = activeHandle else { return }
+        // A running turn owns the process; the idle timer can't realistically
+        // fire mid-stream (the timeout is an hour, turns cap at ten minutes),
+        // but `expireIdleSessionForTesting()` calls this directly, so enforce
+        // the invariant here rather than relying on the clock.
+        guard phase != .running else { return }
         activeHandle = nil
         retainedSessionID = await handle.state?.sessionID
         // The next turn relaunches a fresh CLI with zero prior context (Pi
@@ -775,6 +797,7 @@ final class AskSession: ObservableObject {
             phase = .failed
             AskLog.line("turn \(turnID.uuidString.prefix(8)) completed with empty answer")
             notifyIfCollapsed(success: false)
+            restoreImagesForNextAttempt(turn)
         } else {
             turn.status = .completed
             if let model = result.model, !model.isEmpty {
@@ -803,6 +826,7 @@ final class AskSession: ObservableObject {
             phase = .failed
             AskLog.line("turn \(turnID.uuidString.prefix(8)) failed: \(message)")
             notifyIfCollapsed(success: false)
+            restoreImagesForNextAttempt(turn)
             settlePendingQueue()
         }
     }
@@ -909,12 +933,22 @@ final class AskSession: ObservableObject {
             turn.status = .failed
             turn.errorMessage = message
             replaceTurn(turn)
+            restoreImagesForNextAttempt(turn)
         }
         errorMessage = message
         activity = "Failed"
         phase = .failed
         AskLog.line("turn \(turnID.uuidString.prefix(8)) failed: \(message)")
         notifyIfCollapsed(success: false)
+    }
+
+    /// Re-attach the failed turn's images to the composer so the next
+    /// attempt (a typed follow-up or "Try again") keeps them. The composer
+    /// is emptied on submit, so a failure that does not restore would
+    /// silently drop the attachment.
+    private func restoreImagesForNextAttempt(_ turn: Turn) {
+        guard !turn.images.isEmpty, images.isEmpty else { return }
+        images = turn.images
     }
 
     private func sessionDidEnd(_ reason: String?) {
