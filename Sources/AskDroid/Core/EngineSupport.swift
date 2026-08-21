@@ -677,7 +677,10 @@ actor SessionHandle {
         // turn N doesn't poison turn N+1. `readersAreClosed` is set by the
         // death watch after `waitUntilExit` returns, so it proves the process
         // is gone even if `lastExitStatus` hasn't landed yet.
-        if connection == nil || lastExitStatus != nil || (connection?.process.readersAreClosed ?? true) {
+        if let conn = connection, conn.process.readersAreClosed || lastExitStatus != nil {
+            connection = nil
+        }
+        if connection == nil {
             guard lifetime == .persistent else {
                 sink(.failed(turnID, EngineError.failed("The \(engine.title) session has exited.").localizedDescription))
                 return

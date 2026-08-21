@@ -686,6 +686,42 @@ private func runEngine(
     }
 }
 
+// MARK: Multi-turn harness (start session -> drive turns -> close)
+// `runEngine` blocks until run() returns, so it cannot drive a session that
+// survives its first turn. These helpers keep the process alive between turns.
+
+private func startSession(
+    _ engine: any EngineClient,
+    settings: AppSettings,
+    box: EventBox
+) async throws -> SessionHandle {
+    try await engine.begin(settings: settings, onEvent: box.recorder())
+}
+
+/// Polls `MockProcess.written` for a marker so tests feed protocol lines only
+/// after the engine actually wrote the preceding request.
+private func waitForWritten(_ process: MockProcess, contains needle: String, timeoutSeconds: Double = 5) async -> Bool {
+    let deadline = Date().addingTimeInterval(timeoutSeconds)
+    while Date() < deadline {
+        if process.written.joined().contains(needle) { return true }
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+    return false
+}
+
+private func waitFor(_ condition: @escaping () -> Bool, timeoutSeconds: Double = 5) async -> Bool {
+    let deadline = Date().addingTimeInterval(timeoutSeconds)
+    while Date() < deadline {
+        if condition() { return true }
+        try? await Task.sleep(for: .milliseconds(10))
+    }
+    return false
+}
+
+private func writtenCount(_ process: MockProcess, containing needle: String) -> Int {
+    process.written.filter { $0.contains(needle) }.count
+}
+
 final class EngineStateMachineTests: XCTestCase {
     private static func makeSettings() -> AppSettings {
         var s = AppSettings.default
@@ -930,6 +966,193 @@ final class EngineStateMachineTests: XCTestCase {
         }.last
         XCTAssertEqual(resultB?.text, "B answer")
         try? FileManager.default.removeItem(at: answers)
+    }
+
+    // MARK: Multi-turn on one process
+
+    private static func makeMultiTurnSettings() -> AppSettings {
+        var settings = AppSettings.default
+        settings.droidPath = "/tmp/droid"
+        settings.answersDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString).path
+        return settings
+    }
+
+    private static let droidInitResponse =
+        #"{"jsonrpc":"2.0","id":"1","result":{"session":{"settings":{"modelId":"gpt-5"}}}}"#
+
+    func testDroidServesTwoTurnsOnOneProcess() async throws {
+        let launcher = MockLauncher()
+        let engine = DroidEngine(launcher: launcher, fileExists: { _ in true })
+        let box = EventBox()
+        let settings = Self.makeMultiTurnSettings()
+
+        let handle = try await startSession(engine, settings: settings, box: box)
+        let process = launcher.processes[0]
+        process.feedStdout(Self.droidInitResponse)
+
+        let turn1 = UUID()
+        let send1 = Task.detached {
+            await engine.send(DroidRunRequest(prompt: "one", images: [], settings: settings), turnID: turn1, to: handle)
+        }
+        await waitForWritten(process, contains: "add_user_message")
+        process.feedStdout(#"{"jsonrpc":"2.0","method":"droid.session_notification","params":{"type":"assistant_text_delta","textDelta":"Hello"}}"#)
+        process.feedStdout(#"{"jsonrpc":"2.0","method":"droid.session_notification","params":{"type":"agent_turn_completed","reason":"completed","durationMs":5}}"#)
+        await send1.value
+
+        // Turn 2 rides the same process — no relaunch, no terminate between.
+        let turn2 = UUID()
+        let send2 = Task.detached {
+            await engine.send(DroidRunRequest(prompt: "two", images: [], settings: settings), turnID: turn2, to: handle)
+        }
+        let sawSecondMessage = await waitFor { writtenCount(process, containing: "add_user_message") >= 2 }
+        XCTAssertTrue(sawSecondMessage, "second turn never sent add_user_message")
+        process.feedStdout(#"{"jsonrpc":"2.0","method":"droid.session_notification","params":{"type":"assistant_text_delta","textDelta":"World"}}"#)
+        process.feedStdout(#"{"jsonrpc":"2.0","method":"droid.session_notification","params":{"type":"agent_turn_completed","reason":"completed","durationMs":5}}"#)
+        await send2.value
+
+        XCTAssertEqual(launcher.count, 1, "a second CLI process was launched")
+        XCTAssertFalse(process.terminated, "process was killed between turns")
+
+        let completions = box.snapshot().compactMap { event -> (UUID, String)? in
+            if case .completed(let id, let result) = event { return (id, result.text) }
+            return nil
+        }
+        XCTAssertEqual(completions.map(\.1), ["Hello", "World"])
+        XCTAssertEqual(completions.map(\.0), [turn1, turn2])
+        try? FileManager.default.removeItem(at: URL(fileURLWithPath: settings.answersDirectory))
+        await engine.close(handle)
+    }
+
+    func testDroidErrorReasonFailsTurnButKeepsSessionAlive() async throws {
+        let launcher = MockLauncher()
+        let engine = DroidEngine(launcher: launcher, fileExists: { _ in true })
+        let box = EventBox()
+        let settings = Self.makeMultiTurnSettings()
+
+        let handle = try await startSession(engine, settings: settings, box: box)
+        let process = launcher.processes[0]
+        process.feedStdout(Self.droidInitResponse)
+
+        let turn1 = UUID()
+        let send1 = Task.detached {
+            await engine.send(DroidRunRequest(prompt: "one", images: [], settings: settings), turnID: turn1, to: handle)
+        }
+        await waitForWritten(process, contains: "add_user_message")
+        // The error notification is captured this turn; agent_turn_completed
+        // then reports reason "error" and must fail the turn with that text.
+        process.feedStdout(#"{"jsonrpc":"2.0","method":"droid.session_notification","params":{"type":"error","message":"Connection error."}}"#)
+        process.feedStdout(#"{"jsonrpc":"2.0","method":"droid.session_notification","params":{"type":"agent_turn_completed","reason":"error","durationMs":5,"tokenUsage":{"inputTokens":0,"outputTokens":0}}}"#)
+        await send1.value
+
+        let failure = box.snapshot().compactMap { event -> String? in
+            if case .failed(_, let message) = event { return message }
+            return nil
+        }.last
+        XCTAssertEqual(failure, "Connection error.")
+        XCTAssertFalse(process.terminated, "an errored turn tore the session down")
+
+        // The session is still usable: a follow-up turn completes in-process.
+        let turn2 = UUID()
+        let send2 = Task.detached {
+            await engine.send(DroidRunRequest(prompt: "two", images: [], settings: settings), turnID: turn2, to: handle)
+        }
+        _ = await waitFor { writtenCount(process, containing: "add_user_message") >= 2 }
+        process.feedStdout(#"{"jsonrpc":"2.0","method":"droid.session_notification","params":{"type":"assistant_text_delta","textDelta":"Recovered"}}"#)
+        process.feedStdout(#"{"jsonrpc":"2.0","method":"droid.session_notification","params":{"type":"agent_turn_completed","reason":"completed","durationMs":5}}"#)
+        await send2.value
+
+        XCTAssertEqual(launcher.count, 1)
+        let recovery = box.snapshot().compactMap { event -> String? in
+            if case .completed(_, let result) = event { return result.text }
+            return nil
+        }.last
+        XCTAssertEqual(recovery, "Recovered")
+        try? FileManager.default.removeItem(at: URL(fileURLWithPath: settings.answersDirectory))
+        await engine.close(handle)
+    }
+
+    func testDroidInterruptDoesNotTerminateProcess() async throws {
+        let launcher = MockLauncher()
+        let engine = DroidEngine(launcher: launcher, fileExists: { _ in true })
+        let box = EventBox()
+        let settings = Self.makeMultiTurnSettings()
+
+        let handle = try await startSession(engine, settings: settings, box: box)
+        let process = launcher.processes[0]
+        process.feedStdout(Self.droidInitResponse)
+
+        let turn1 = UUID()
+        let send1 = Task.detached {
+            await engine.send(DroidRunRequest(prompt: "one", images: [], settings: settings), turnID: turn1, to: handle)
+        }
+        await waitForWritten(process, contains: "add_user_message")
+
+        await engine.interrupt(handle)
+
+        // The interrupt is protocol bytes, not a kill.
+        XCTAssertTrue(process.written.joined().contains("droid.interrupt_session"))
+        XCTAssertFalse(process.terminated, "interrupt terminated the process")
+        await send1.value
+
+        let interruptions = box.snapshot().compactMap { event -> UUID? in
+            if case .interrupted(let id) = event { return id }
+            return nil
+        }
+        XCTAssertEqual(interruptions, [turn1])
+        XCTAssertEqual(launcher.count, 1)
+        await engine.close(handle)
+    }
+
+    func testUnexpectedProcessExitFailsTurnAndMarksSessionDead() async throws {
+        let launcher = MockLauncher()
+        let engine = DroidEngine(launcher: launcher, fileExists: { _ in true })
+        let box = EventBox()
+        let settings = Self.makeMultiTurnSettings()
+
+        let handle = try await startSession(engine, settings: settings, box: box)
+        let process = launcher.processes[0]
+        process.feedStdout(Self.droidInitResponse)
+
+        let turn1 = UUID()
+        let send1 = Task.detached {
+            await engine.send(DroidRunRequest(prompt: "one", images: [], settings: settings), turnID: turn1, to: handle)
+        }
+        await waitForWritten(process, contains: "add_user_message")
+        process.feedStdout(#"{"jsonrpc":"2.0","method":"droid.session_notification","params":{"type":"assistant_text_delta","textDelta":"partial"}}"#)
+        // Crash mid-turn.
+        process.closeStdout()
+        process.closeStderr()
+        process.setExit(1)
+        await send1.value
+
+        let failure = box.snapshot().compactMap { event -> String? in
+            if case .failed(_, let message) = event { return message }
+            return nil
+        }.last
+        XCTAssertEqual(failure, "Droid exited with status 1.")
+
+        // The next send relaunches instead of talking into a dead pipe.
+        let turn2 = UUID()
+        let send2 = Task.detached {
+            await engine.send(DroidRunRequest(prompt: "two", images: [], settings: settings), turnID: turn2, to: handle)
+        }
+        _ = await waitFor { launcher.count >= 2 }
+        let replacement = launcher.processes[1]
+        replacement.feedStdout(Self.droidInitResponse)
+        _ = await waitForWritten(replacement, contains: "add_user_message")
+        replacement.feedStdout(#"{"jsonrpc":"2.0","method":"droid.session_notification","params":{"type":"assistant_text_delta","textDelta":"back"}}"#)
+        replacement.feedStdout(#"{"jsonrpc":"2.0","method":"droid.session_notification","params":{"type":"agent_turn_completed","reason":"completed","durationMs":5}}"#)
+        await send2.value
+
+        XCTAssertEqual(launcher.count, 2)
+        let recovery = box.snapshot().compactMap { event -> String? in
+            if case .completed(_, let result) = event { return result.text }
+            return nil
+        }.last
+        XCTAssertEqual(recovery, "back")
+        try? FileManager.default.removeItem(at: URL(fileURLWithPath: settings.answersDirectory))
+        await engine.close(handle)
     }
 }
 

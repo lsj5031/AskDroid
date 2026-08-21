@@ -85,6 +85,15 @@ actor DroidEngine: EngineClient {
                 onEvent(.log(turn.turnID, "Question sent"))
                 await turn.appendLog("Question sent")
             },
+            turnDidEnd: { process, session in
+                // Footer meta: ask for context fill after every settled turn.
+                let id = await session.registerRequest(as: .contextStats)
+                try? process.write(try JSONRPC.encodeLine(JSONRPC.request(
+                    id: id,
+                    method: "droid.get_context_stats",
+                    params: [:]
+                )))
+            },
             onTurnEnd: { _, _ in
                 // Engine-side bookkeeping (context stats) rides the runner's
                 // turnDidEnd hook.
@@ -258,7 +267,15 @@ actor DroidEngine: EngineClient {
             case .userMessage:
                 onEvent(.activity(turnID, "Droid is working…"))
                 return
-            case .contextStats, .interrupt, .closeSession:
+            case .contextStats:
+                if let result = message["result"] as? [String: Any],
+                   let used = Self.statValue(result["used"]),
+                   let limit = Self.statValue(result["limit"])
+                {
+                    onEvent(.contextStats(used: used, limit: limit))
+                }
+                return
+            case .interrupt, .closeSession:
                 return
             }
         }
@@ -300,19 +317,27 @@ actor DroidEngine: EngineClient {
         case .error(let message):
             onEvent(.log(turnID, message))
             await turn.appendLog(message)
+            // Capture the cause only. agent_turn_completed carries
+            // reason:"error" and ends the turn as failed, preferring this
+            // text; marking alone must not tear the session down.
             await turn.mark(error: message)
-            process.terminate()
-        case .turnCompleted(let durationMs, let usage):
+        case .turnCompleted(let reason, let durationMs, let usage):
             if let durationMs {
                 await turn.applyDuration(durationMs: durationMs)
             }
             if let usage {
                 await turn.setUsage(usage)
             }
-            // The turn ended. Ending a turn is a protocol event — it is not
-            // process death (the handle owns the physical teardown). The
-            // handle's endTurn performs the first-wins end and settles.
-            await turnEnded(turn, .completed)
+            if reason == "error" {
+                // An errored turn fails; the session stays open.
+                let message = (await turn.lastError) ?? "\(Engine.droid.title) reported the turn failed."
+                await turn.mark(error: message)
+                await turnEnded(turn, .failed)
+            } else {
+                // The turn ended. Ending a turn is a protocol event — it is
+                // not process death (the handle owns the physical teardown).
+                await turnEnded(turn, .completed)
+            }
         case .ignored:
             // Unknown session_notification subtypes are noise; anything else with a
             // method name is worth surfacing for diagnostics.
@@ -332,6 +357,12 @@ actor DroidEngine: EngineClient {
     private func stringID(_ value: Any?) -> String? {
         if let value = value as? String { return value }
         if let value = value as? Int { return String(value) }
+        return nil
+    }
+
+    private static func statValue(_ value: Any?) -> Int? {
+        if let number = value as? Int { return number }
+        if let number = value as? Double { return Int(number) }
         return nil
     }
 
