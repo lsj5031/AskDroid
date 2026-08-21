@@ -1298,6 +1298,21 @@ final class MainMenuTests: XCTestCase {
     }
 }
 
+final class TranscriptSizingTests: XCTestCase {
+    /// The transcript scroll hugs short conversations instead of shipping a
+    /// dead band under the newest turn.
+    func testTranscriptScrollHugsContentUntilCap() {
+        XCTAssertEqual(ExpandedHUD.transcriptScrollHeight(content: 96, cap: 280), 96)
+        XCTAssertEqual(ExpandedHUD.transcriptScrollHeight(content: 279.5, cap: 280), 279.5)
+        // Long conversations cap exactly as the old open-ended frame did.
+        XCTAssertEqual(ExpandedHUD.transcriptScrollHeight(content: 520, cap: 280), 280)
+        XCTAssertEqual(ExpandedHUD.transcriptScrollHeight(content: 280, cap: 280), 280)
+        // Unmeasured content (first layout pass) reserves the cap rather
+        // than collapsing the scroll to zero height.
+        XCTAssertEqual(ExpandedHUD.transcriptScrollHeight(content: 0, cap: 280), 280)
+    }
+}
+
 final class RealDroidIntegrationTests: XCTestCase {
     /// Runs the real droid CLI through the production engine and launcher.
     /// Skipped unless ASKDROID_INTEGRATION=1 is set.

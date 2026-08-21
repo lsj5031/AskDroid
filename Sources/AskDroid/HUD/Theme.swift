@@ -29,8 +29,8 @@ enum Theme {
     /// chrome the way a separately-padded overlay can.
     static let fieldCorner: CGFloat = 10
     static let fieldInset: CGFloat = 12
-    static let fieldVerticalInset: CGFloat = 12
-    static let fieldMinHeight: CGFloat = 44
+    static let fieldVerticalInset: CGFloat = 8
+    static let fieldMinHeight: CGFloat = 40
     static let fieldMaxHeight: CGFloat = 88
 
     /// Corner radius and vertical padding for the settings controls' wells.
@@ -38,7 +38,9 @@ enum Theme {
     static let settingsControlPadding: CGFloat = 8
 
     static let settingsContentHeight: CGFloat = 720
-    static let composerContentHeight: CGFloat = 188
+    /// Pre-measurement composer reserve; tracks the tightened field chrome
+    /// (40 pt min field + footer meta) so the transient frame isn't oversized.
+    static let composerContentHeight: CGFloat = 168
     static let imageStripHeight: CGFloat = 72
     static let answerBlockHeight: CGFloat = 240
     static let maxExpandedHeight: CGFloat = 780

@@ -371,7 +371,7 @@ struct ExpandedHUD: View {
                         }
                     }
                 }
-                .frame(maxHeight: 280)
+                .frame(height: Self.transcriptScrollHeight(content: answerContentHeight, cap: 280))
                 // Positioning is programmatic: turn start and completion pin
                 // the newest question near the top; streaming follows the
                 // bottom only while the user hasn't scrolled away (see the
@@ -445,6 +445,18 @@ struct ExpandedHUD: View {
         Array(session.transcript.dropLast())
     }
 
+    /// Viewport height for the transcript scroll: short conversations hug
+    /// their measured content, long ones cap exactly as the old open-ended
+    /// `maxHeight` did. The measured height already includes the content's
+    /// own vertical padding (the preference is posted from inside the scroll
+    /// content's background), so it maps 1:1 onto the viewport and the loop
+    /// is stable — the measurement depends on content and fixed width only,
+    /// never on the frame this feeds. An unmeasured value (0, first layout
+    /// pass only) reserves the cap.
+    static func transcriptScrollHeight(content: CGFloat, cap: CGFloat) -> CGFloat {
+        content > 0 ? min(content, cap) : cap
+    }
+
     /// The newest turn renders full-size. Its mirrors on the session are kept
     /// in sync with this turn; older turns read their own `Turn` values.
     private var newestTurnContent: some View {
@@ -493,11 +505,9 @@ struct ExpandedHUD: View {
                     .lineSpacing(3)
                     .tracking(0.1)
                     .textSelection(.enabled)
-            } else if session.phase == .running {
-                Text(session.activity)
-                    .font(.system(size: 13))
-                    .foregroundStyle(Theme.mute)
             }
+            // Live activity copy is deliberately not repeated here: the
+            // header's secondary line already streams it (HeaderLines.secondary).
             if !session.runLog.isEmpty {
                 DisclosureGroup("Activity", isExpanded: $activityLogExpanded) {
                     VStack(alignment: .leading, spacing: 3) {
