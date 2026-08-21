@@ -705,60 +705,74 @@ struct ExpandedHUD: View {
 
     private var footer: some View {
         HStack(spacing: 10) {
-            if session.phase == .running {
-                MetaLabel(AnswerArchive.formatDuration(session.elapsed))
-                Button("Cancel", action: session.interruptTurn)
+            // Meta: compressible, truncates tail. Actions keep priority.
+            HStack(spacing: 8) {
+                if session.phase == .running {
+                    MetaLabel(AnswerArchive.formatDuration(session.elapsed))
+                    Button("Cancel", action: session.interruptTurn)
+                        .buttonStyle(GhostButtonStyle())
+                        .help("Stop this turn; the conversation stays open")
+                        .fixedSize(horizontal: true, vertical: false)
+                }
+                if let durationText = session.durationText {
+                    MetaLabel(durationText)
+                }
+                if let tokenSummary = session.tokenSummary {
+                    MetaLabel(tokenSummary)
+                }
+                if let stats = session.contextStats {
+                    MetaLabel(stats.label)
+                        .help("Context window fill reported by \(session.settings.engine.title)")
+                }
+            }
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .layoutPriority(0)
+
+            Spacer(minLength: 12)
+
+            HStack(spacing: 8) {
+                if !session.answer.isEmpty {
+                    Button {
+                        session.copyAnswer()
+                    } label: {
+                        Label(
+                            session.copied ? "Copied" : "Copy",
+                            systemImage: session.copied ? "checkmark" : "doc.on.doc"
+                        )
+                    }
                     .buttonStyle(GhostButtonStyle())
-                    .help("Stop this turn; the conversation stays open")
-            }
-            if let durationText = session.durationText {
-                MetaLabel(durationText)
-            }
-            if let tokenSummary = session.tokenSummary {
-                MetaLabel(tokenSummary)
-            }
-            if let stats = session.contextStats {
-                MetaLabel(stats.label)
-                    .help("Context window fill reported by \(session.settings.engine.title)")
-            }
-            Spacer()
-            if !session.answer.isEmpty {
-                Button {
-                    session.copyAnswer()
-                } label: {
-                    Label(
-                        session.copied ? "Copied" : "Copy",
-                        systemImage: session.copied ? "checkmark" : "doc.on.doc"
-                    )
+                    .foregroundStyle(session.copied ? Theme.success : Theme.ink)
+                    .help("Copy answer")
                 }
-                .buttonStyle(GhostButtonStyle())
-                .foregroundStyle(session.copied ? Theme.success : Theme.ink)
-                .help("Copy answer")
-            }
-            if session.archiveURL != nil {
-                Button {
-                    session.openArchive()
-                } label: {
-                    Label("Open file", systemImage: "folder")
+                if session.archiveURL != nil {
+                    Button {
+                        session.openArchive()
+                    } label: {
+                        Label("Open file", systemImage: "folder")
+                    }
+                    .buttonStyle(GhostButtonStyle())
+                    .help("Reveal the saved answer file")
                 }
-                .buttonStyle(GhostButtonStyle())
-                .help("Reveal the saved answer file")
-            }
-            if session.phase == .failed {
-                Button("Try again") {
-                    session.retryFailedTurn()
+                if session.phase == .failed {
+                    Button("Try again") {
+                        session.retryFailedTurn()
+                    }
+                    .buttonStyle(PrimaryButtonStyle())
                 }
-                .buttonStyle(PrimaryButtonStyle())
-            }
-            if session.phase == .completed || session.phase == .failed || session.phase == .interrupted {
-                Button {
-                    session.startNewConversation()
-                } label: {
-                    Label("New", systemImage: "plus")
+                if session.phase == .completed || session.phase == .failed || session.phase == .interrupted {
+                    Button {
+                        session.startNewConversation()
+                    } label: {
+                        Label("New", systemImage: "plus")
+                    }
+                    .buttonStyle(GhostButtonStyle())
+                    .help("Start a new conversation")
                 }
-                .buttonStyle(GhostButtonStyle())
-                .help("Start a new conversation")
             }
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .layoutPriority(1)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
