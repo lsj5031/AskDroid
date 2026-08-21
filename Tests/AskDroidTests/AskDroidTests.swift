@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import XCTest
 @testable import AskDroidKit
 
@@ -2872,5 +2873,103 @@ final class PiEngineStateMachineTests: XCTestCase {
         XCTAssertEqual(completions, ["First", "Second"])
         try? FileManager.default.removeItem(at: URL(fileURLWithPath: settings.answersDirectory))
         await engine.close(handle)
+    }
+}
+
+// MARK: - Prompt editor sizing
+
+/// Counts intrinsic-size invalidations. `InputScrollView` itself is final,
+/// but the coordinator only talks to `textView.enclosingScrollView`, so a
+/// plain NSScrollView subclass is enough to observe the notification that
+/// tells SwiftUI to re-measure the field.
+@MainActor
+private final class CountingScrollView: NSScrollView {
+    private(set) var invalidationCount = 0
+    override func invalidateIntrinsicContentSize() {
+        invalidationCount += 1
+        super.invalidateIntrinsicContentSize()
+    }
+}
+
+@MainActor
+final class PromptEditorTests: XCTestCase {
+    /// Wires an InputTextView into `scroll` exactly like
+    /// `PromptEditor.makeNSView` does, minus the window/SwiftUI plumbing the
+    /// sizing math never reads.
+    private func attachEditor(to scroll: NSScrollView) -> InputTextView {
+        let textView = InputTextView()
+        textView.font = NSFont.systemFont(ofSize: 15, weight: .regular)
+        textView.isRichText = false
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.textContainerInset = NSSize(width: Theme.fieldInset, height: Theme.fieldVerticalInset)
+        scroll.documentView = textView
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.lineFragmentPadding = 0
+        return textView
+    }
+
+    /// Regression: submitting a long prompt cleared the text programmatically
+    /// but never re-reported the field's ideal height, so SwiftUI kept the
+    /// empty composer near its max height instead of one line.
+    func testProgrammaticClearCollapsesIntrinsicHeight() {
+        let scroll = InputScrollView()
+        scroll.frame = NSRect(x: 0, y: 0, width: 360, height: Theme.fieldMaxHeight)
+        let textView = attachEditor(to: scroll)
+
+        // Empty baseline: the field hugs one line.
+        scroll.layoutSubtreeIfNeeded()
+        let singleLine = scroll.intrinsicContentSize.height
+
+        // A long prompt wraps into many lines and grows the field.
+        textView.string = String(repeating: "pelican wingspan ", count: 40)
+        scroll.layoutSubtreeIfNeeded()
+        let tall = scroll.intrinsicContentSize.height
+        XCTAssertGreaterThan(tall, singleLine * 2, "multi-line text never grew the field")
+
+        // Clear exactly like Coordinator.resetEditor: string swap, selection
+        // reset, then the intrinsic-size invalidation.
+        textView.string = ""
+        textView.setSelectedRange(NSRange(location: 0, length: 0))
+        textView.enclosingScrollView?.invalidateIntrinsicContentSize()
+
+        XCTAssertEqual(
+            scroll.intrinsicContentSize.height,
+            singleLine,
+            accuracy: 0.5,
+            "cleared field kept its multi-line height"
+        )
+    }
+
+    /// The real reset path must notify SwiftUI (the invalidation), not just
+    /// swap the string — reading `intrinsicContentSize` recomputes either way,
+    /// so the invalidation is the observable contract. The geometry itself is
+    /// covered by `testProgrammaticClearCollapsesIntrinsicHeight`.
+    func testResetEditorInvalidatesClearedField() {
+        var prompt = String(repeating: "long running question ", count: 40)
+        let coordinator = PromptEditor.Coordinator(
+            text: Binding(get: { prompt }, set: { prompt = $0 }),
+            onSubmit: {},
+            onPasteImages: {},
+            onFocusChange: { _ in }
+        )
+        let scroll = CountingScrollView()
+        let textView = attachEditor(to: scroll)
+        textView.string = prompt
+        coordinator.textView = textView
+
+        prompt = ""
+        coordinator.resetEditor()
+
+        XCTAssertEqual(textView.string, "")
+        XCTAssertGreaterThanOrEqual(
+            scroll.invalidationCount, 1,
+            "resetEditor never re-reported the field's ideal size"
+        )
     }
 }

@@ -171,6 +171,10 @@ struct PromptEditor: NSViewRepresentable {
             guard let textView, textView.string != text.wrappedValue else { return }
             textView.string = text.wrappedValue
             textView.setSelectedRange(NSRange(location: 0, length: 0))
+            // The field hugs its content; re-report its ideal height so the
+            // SwiftUI frame collapses back to one line after the clear,
+            // exactly like the typing path in `textDidChange`.
+            textView.enclosingScrollView?.invalidateIntrinsicContentSize()
         }
     }
 }
