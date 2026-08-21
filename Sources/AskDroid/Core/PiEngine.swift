@@ -130,6 +130,14 @@ actor PiEngine: EngineClient {
 
     nonisolated var steersOnWire: Bool { true }
 
+    /// Names the session in-process (verified against the RPC spec). The
+    /// name is readable back via `get_state`'s `sessionName`.
+    func setName(_ name: String, to handle: SessionHandle) async {
+        if let line = try? Self.encodeJSON(["type": "set_session_name", "name": name]) {
+            try? await handle.writeLine(line)
+        }
+    }
+
     func interrupt(_ handle: SessionHandle) async {
         if let line = try? Self.encodeJSON(["type": "abort"]) {
             try? await handle.writeLine(line)

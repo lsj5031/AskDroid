@@ -280,6 +280,14 @@ actor DroidEngine: EngineClient {
             }
         }
 
+        // Session-scoped notifications can arrive between turns (the title
+        // often lands after the first message settles); they must survive
+        // even when no turn is live, so extract them before the turn gate.
+        if case .sessionTitle(let title) = DroidNotificationParser.parse(message) {
+            onEvent(.sessionTitle(title))
+            return
+        }
+
         // The turn is over; ignore stragglers. The reader keeps running for
         // the life of the process.
         if await turn.isEnded { return }
@@ -338,6 +346,8 @@ actor DroidEngine: EngineClient {
                 // not process death (the handle owns the physical teardown).
                 await turnEnded(turn, .completed)
             }
+        case .sessionTitle:
+            break // handled before the turn gate so titles survive between turns
         case .ignored:
             // Unknown session_notification subtypes are noise; anything else with a
             // method name is worth surfacing for diagnostics.

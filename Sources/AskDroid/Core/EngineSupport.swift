@@ -31,6 +31,11 @@ protocol EngineClient: AnyObject, Sendable {
     /// client-side by the session and sent as the next turn instead.
     var steersOnWire: Bool { get }
 
+    /// Names the session where the engine supports it (Pi's
+    /// `set_session_name`). Engines that derive titles themselves (droid's
+    /// `session_title_updated`) ignore this; their titles arrive as events.
+    func setName(_ name: String, to handle: SessionHandle) async
+
     /// Clear conversation context without dropping the session where the
     /// engine supports it.
     func reset(_ handle: SessionHandle) async
@@ -64,6 +69,8 @@ extension EngineClient {
     }
 
     var steersOnWire: Bool { false }
+
+    func setName(_ name: String, to handle: SessionHandle) async {}
 }
 
 enum Engine: String, CaseIterable, Identifiable, Sendable {
@@ -147,6 +154,8 @@ enum EngineEvent: Sendable {
     case contextStats(used: Int, limit: Int)
     /// Steering queue changes (plan 008 Phase 7).
     case queueChanged([String])
+    /// The engine named the session (droid's `session_title_updated`).
+    case sessionTitle(String)
     /// The CLI process is gone. `nil` reason means we closed it ourselves.
     case sessionEnded(String?)
     /// A session was established and is ready for turns.
@@ -439,9 +448,11 @@ actor TurnState {
 }
 
 enum EngineSupport {
-    /// Shared terminal flow for a completed turn: archive the answer (tagged
-    /// with the engine) and emit `.completed`. Called by the runner when a
-    /// turn ends — never by the engines themselves.
+    /// Shared terminal flow for a completed turn: emit `.completed`. Called
+    /// by the runner when a turn ends — never by the engines themselves.
+    /// Archiving lives in `AskSession` (plan 008 Phase 8): only it sees the
+    /// whole transcript, and the archive is one file per conversation,
+    /// rewritten as turns complete.
     static func emitCompletion(
         session: EngineSession,
         turn: TurnState,
@@ -455,33 +466,13 @@ enum EngineSupport {
         if snapshot.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             onEvent(.log(turnID, "\(engine.title) ended the run with no text answer."))
         }
-        var archiveURL: URL?
-        var archiveError: String?
-        if !snapshot.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            do {
-                let archived = try AnswerArchive.write(
-                    directory: URL(fileURLWithPath: snapshot.request.settings.resolvedAnswersDirectory, isDirectory: true),
-                    question: snapshot.request.prompt,
-                    answer: snapshot.answer,
-                    model: model,
-                    duration: duration,
-                    engine: engine.rawValue,
-                    images: snapshot.request.images
-                )
-                archiveURL = archived.markdownURL
-                onEvent(.log(turnID, "Saved \(archived.markdownURL.lastPathComponent)"))
-            } catch {
-                archiveError = "Could not save the answer file: \(error.localizedDescription)"
-                onEvent(.log(turnID, archiveError ?? "Could not save the answer file."))
-            }
-        }
         onEvent(.completed(turnID, EngineResult(
             text: snapshot.answer,
             model: model,
             duration: duration,
             tokenUsage: snapshot.tokenUsage,
-            archiveURL: archiveURL,
-            archiveError: archiveError
+            archiveURL: nil,
+            archiveError: nil
         )))
     }
 

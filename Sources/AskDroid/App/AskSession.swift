@@ -77,6 +77,10 @@ final class AskSession: ObservableObject {
     /// mirror their remote queue here; other engines hold the message until
     /// the running turn settles and it auto-sends as the next one.
     @Published var pendingMessages: [String] = []
+    /// The session's display name (droid's `session_title_updated`, or a
+    /// local derivation pushed to Pi via `set_session_name`). Drives the HUD
+    /// header and the archive filename.
+    @Published var sessionTitle: String?
     @Published var answer = ""
     @Published var thinking = ""
     @Published var activity = ""
@@ -121,6 +125,12 @@ final class AskSession: ObservableObject {
     /// Retained across an idle close; resumption across relaunches is a
     /// documented follow-up plan.
     private var retainedSessionID: String?
+    // Conversation archive state (plan 008 Phase 8). The archive is one file
+    // per conversation, rewritten as turns complete.
+    private var conversationArchiveBase: String?
+    private var conversationStartedAt: Date?
+    private var conversationModel: String?
+    private var didNameSession = false
 
     init(
         settings: AppSettings = SettingsStore.load(),
@@ -217,6 +227,9 @@ final class AskSession: ObservableObject {
             return
         }
         let turnID = UUID()
+        if conversationStartedAt == nil {
+            conversationStartedAt = Date()
+        }
         let request = EngineRequest(
             prompt: prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 ? "Look at the attached image(s)."
@@ -561,6 +574,12 @@ final class AskSession: ObservableObject {
             } else {
                 pendingMessages = []
             }
+        case .sessionTitle(let title):
+            // Droid names sessions itself; its title wins over any local
+            // derivation for the header and the archive filename.
+            guard !title.isEmpty else { return }
+            didNameSession = true
+            sessionTitle = title
         case .sessionEnded(let reason):
             sessionDidEnd(reason)
         }
@@ -624,11 +643,15 @@ final class AskSession: ObservableObject {
             notifyIfCollapsed(success: false)
         } else {
             turn.status = .completed
+            if let model = result.model, !model.isEmpty {
+                conversationModel = model
+            }
             replaceTurn(turn)
-            archiveError = result.archiveError
-            activity = result.archiveError == nil ? "Done" : "Answer ready, file not saved"
+            activity = "Done"
             phase = .completed
-            AskLog.line("turn \(turnID.uuidString.prefix(8)) completed archive=\(result.archiveURL?.lastPathComponent ?? "none") archiveError=\(result.archiveError ?? "none")")
+            AskLog.line("turn \(turnID.uuidString.prefix(8)) completed")
+            maybeNameSession()
+            archiveConversation()
             notifyIfCollapsed(success: true)
         }
         settlePendingQueue()
@@ -679,6 +702,71 @@ final class AskSession: ObservableObject {
         }
     }
 
+    // MARK: Conversation archive
+
+    /// Rewrites the conversation archive with every completed turn so far.
+    /// One file per conversation: the first write resolves the base name
+    /// (title-derived when the session has one), later writes reuse it.
+    private func archiveConversation() {
+        let completed = transcript.filter { $0.status == .completed }
+        guard !completed.isEmpty else { return }
+        do {
+            let archived = try AnswerArchive.write(
+                directory: URL(fileURLWithPath: settings.resolvedAnswersDirectory, isDirectory: true),
+                date: conversationStartedAt ?? Date(),
+                turns: completed.map { turn in
+                    ArchivedTurn(
+                        question: turn.question,
+                        answer: turn.answer,
+                        images: turn.images,
+                        durationText: turn.durationText
+                    )
+                },
+                model: conversationModel,
+                engine: settings.engine.rawValue,
+                title: sessionTitle,
+                base: conversationArchiveBase
+            )
+            conversationArchiveBase = archived.baseName
+            // Every completed turn points at the same living file.
+            for turn in transcript where turn.status == .completed && turn.archiveURL != archived.markdownURL {
+                mutateTurn(turn.id) { $0.archiveURL = archived.markdownURL }
+            }
+            archiveError = nil
+        } catch {
+            archiveError = "Could not save the answer file: \(error.localizedDescription)"
+            AskLog.line("archive failed: \(error.localizedDescription)")
+        }
+    }
+
+    /// Derives a display name from the first question for engines that don't
+    /// title sessions themselves. Droid's own `session_title_updated`
+    /// overwrites this when it arrives.
+    private func maybeNameSession() {
+        guard sessionTitle == nil, !didNameSession, !transcript.isEmpty else { return }
+        didNameSession = true
+        let title = Self.derivedSessionTitle(from: transcript[0].question)
+        guard !title.isEmpty else { return }
+        sessionTitle = title
+        guard let handle = activeHandle else { return }
+        let client = self.engine
+        Task { [client] in
+            await client.setName(title, to: handle)
+        }
+    }
+
+    static func derivedSessionTitle(from question: String) -> String {
+        // No regex here: Foundation's regularExpression matching can match a
+        // single whitespace character, so a replace-with-" " loop never
+        // advances. split/join is total.
+        let collapsed = question.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        guard collapsed.count > 3 else { return "" }
+        if collapsed.count <= 48 {
+            return collapsed
+        }
+        return String(collapsed.prefix(48)).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     private func failActiveTurn(_ message: String) {
         guard let turnID = currentRunID else { return }
         ticker?.cancel()
@@ -719,6 +807,11 @@ final class AskSession: ObservableObject {
         contextStats = nil
         pendingMessages = []
         expandedTurnIDs = []
+        sessionTitle = nil
+        conversationArchiveBase = nil
+        conversationStartedAt = nil
+        conversationModel = nil
+        didNameSession = false
         activity = ""
         currentRunID = nil
         phase = isExpanded ? .composing : .idle

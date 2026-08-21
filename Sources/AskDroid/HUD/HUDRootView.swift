@@ -213,9 +213,12 @@ struct ExpandedHUD: View {
         HStack(spacing: 10) {
             StatusDot(phase: session.phase)
             VStack(alignment: .leading, spacing: 1) {
-                Text(session.isSettingsOpen ? "Settings" : "AskDroid")
+                Text(session.isSettingsOpen ? "Settings" : (session.sessionTitle ?? "AskDroid"))
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(Theme.ink)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(session.sessionTitle ?? "")
                 Text(session.isSettingsOpen ? "Optional overrides. Blank uses \(session.settings.engine.title) defaults." : session.activity.isEmpty ? "\(session.settings.hotkeyDisplay) · ⌘↩ ask · Esc hide" : session.activity)
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.mute)

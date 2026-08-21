@@ -235,42 +235,140 @@ final class ArchiveTests: XCTestCase {
 
         let archived = try AnswerArchive.write(
             directory: directory,
-            question: "What is this?",
-            answer: "A square.",
-            model: nil,
-            duration: 1.2,
-            images: []
+            turns: [ArchivedTurn(question: "What is this?", answer: "A square.", images: [], durationText: nil)],
+            model: nil
         )
         XCTAssertTrue(FileManager.default.fileExists(atPath: archived.markdownURL.path))
         XCTAssertTrue(archived.markdownURL.path.hasPrefix(directory.path))
     }
 
+    private static func makeImage() -> AttachedImage {
+        AttachedImage(
+            id: UUID(),
+            data: Data([0x89, 0x50, 0x4E, 0x47]),
+            mediaType: "image/png",
+            filename: "paste.png"
+        )
+    }
+
     func testMarkdownIncludesQuestionAnswerAndImages() {
         let body = AnswerArchive.markdown(
-            question: "What is this?",
-            answer: "A square.",
-            model: "claude-opus-5",
-            duration: 3.2,
-            imageNames: ["droid-x-1.png"]
+            turns: [ArchiveTurnContent(
+                question: "What is this?",
+                answer: "A square.",
+                imageNames: ["droid-x-1.png"],
+                durationText: AnswerArchive.formatDuration(3.2)
+            )],
+            model: "claude-opus-5"
         )
-        XCTAssertTrue(body.contains("## Question"))
+        XCTAssertTrue(body.contains("## Turn 1"))
+        XCTAssertTrue(body.contains("### Question"))
         XCTAssertTrue(body.contains("What is this?"))
+        XCTAssertTrue(body.contains("### Answer"))
         XCTAssertTrue(body.contains("A square."))
         XCTAssertTrue(body.contains("![](droid-x-1.png)"))
         XCTAssertTrue(body.contains("claude-opus-5"))
+        XCTAssertTrue(body.contains("- Duration: 3.2s"))
     }
 
-    func testMarkdownIncludesEngine() {
+    func testMarkdownIncludesEngineAndTitle() {
         let body = AnswerArchive.markdown(
-            question: "What is this?",
-            answer: "A square.",
+            turns: [ArchiveTurnContent(question: "What is this?", answer: "A square.", imageNames: [], durationText: nil)],
             model: "claude-opus-5",
-            duration: 3.2,
             engine: "pi",
-            imageNames: []
+            title: "fix the login bug"
         )
         XCTAssertTrue(body.contains("- Engine: Pi"))
         XCTAssertTrue(body.contains("- Model: claude-opus-5"))
+        XCTAssertTrue(body.contains("- Title: fix the login bug"))
+    }
+
+    func testConversationMarkdownGrowsOneSectionPerTurn() {
+        let body = AnswerArchive.markdown(
+            turns: [
+                ArchiveTurnContent(question: "first?", answer: "one", imageNames: [], durationText: nil),
+                ArchiveTurnContent(question: "second?", answer: "two", imageNames: [], durationText: nil),
+            ],
+            model: nil
+        )
+        XCTAssertTrue(body.contains("## Turn 1"))
+        XCTAssertTrue(body.contains("## Turn 2"))
+        XCTAssertFalse(body.contains("## Turn 3"))
+        // Turn order is preserved.
+        let turn1 = body.range(of: "## Turn 1")!.lowerBound
+        let turn2 = body.range(of: "## Turn 2")!.lowerBound
+        XCTAssertTrue(turn1 < turn2)
+        XCTAssertTrue(body.contains("first?"))
+        XCTAssertTrue(body.contains("two"))
+    }
+
+    func testWriteRewritesSameFilePerTurn() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("askdroid-archive-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let first = try AnswerArchive.write(
+            directory: directory,
+            turns: [ArchivedTurn(question: "first?", answer: "one", images: [], durationText: nil)],
+            model: nil
+        )
+        XCTAssertTrue(first.markdownURL.lastPathComponent.hasSuffix(".md"))
+
+        // The rewrite passes the resolved base back in and lands on the SAME
+        // file, now containing both turns.
+        let second = try AnswerArchive.write(
+            directory: directory,
+            turns: [
+                ArchivedTurn(question: "first?", answer: "one", images: [], durationText: nil),
+                ArchivedTurn(question: "second?", answer: "two", images: [], durationText: nil),
+            ],
+            model: nil,
+            base: first.baseName
+        )
+        XCTAssertEqual(second.markdownURL, first.markdownURL)
+        let body = try String(contentsOf: second.markdownURL, encoding: .utf8)
+        XCTAssertTrue(body.contains("## Turn 1"))
+        XCTAssertTrue(body.contains("## Turn 2"))
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: directory.path)
+                .filter { $0.hasSuffix(".md") }.count,
+            1,
+            "rewriting spawned extra archive files"
+        )
+    }
+
+    func testImageNamesContinueAcrossTurns() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("askdroid-archive-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let archived = try AnswerArchive.write(
+            directory: directory,
+            turns: [
+                ArchivedTurn(question: "a", answer: "b", images: [Self.makeImage()], durationText: nil),
+                ArchivedTurn(question: "c", answer: "d", images: [Self.makeImage(), Self.makeImage()], durationText: nil),
+            ],
+            model: nil,
+            base: "pi-test"
+        )
+        XCTAssertEqual(archived.imageURLs.map(\.lastPathComponent), ["pi-test-1.png", "pi-test-2.png", "pi-test-3.png"])
+        let body = try String(contentsOf: archived.markdownURL, encoding: .utf8)
+        XCTAssertTrue(body.contains("![](pi-test-1.png)"))
+        XCTAssertTrue(body.contains("![](pi-test-3.png)"))
+    }
+
+    func testTitleSanitizesIntoFilename() {
+        XCTAssertEqual(AnswerArchive.sanitizeTitle("Fix the login bug!"), "Fix-the-login-bug")
+        XCTAssertEqual(AnswerArchive.sanitizeTitle("  ///  "), "")
+        XCTAssertEqual(AnswerArchive.sanitizeTitle(String(repeating: "x", count: 100)).count, 40)
+        let name = AnswerArchive.uniqueBaseName(
+            root: "pi-\(AnswerArchive.sanitizeTitle("my/feature:v2"))",
+            existingNames: []
+        )
+        XCTAssertEqual(name, "pi-my-feature-v2")
+        // Collision suffixes still apply to title-derived roots.
+        let suffixed = AnswerArchive.uniqueBaseName(root: name, existingNames: ["\(name).md"])
+        XCTAssertEqual(suffixed, "\(name)-2")
     }
 
     func testUniqueNameWithPiPrefix() {
@@ -806,7 +904,9 @@ final class EngineStateMachineTests: XCTestCase {
         }.last
         XCTAssertEqual(result?.text, "Hello")
         XCTAssertEqual(result?.model, "gpt-5")
-        XCTAssertNotNil(result?.archiveURL)
+        // Archiving is conversation-level since plan 008 Phase 8: engines
+        // emit completions without files; AskSession owns the archive.
+        XCTAssertNil(result?.archiveURL)
         try? FileManager.default.removeItem(at: answers)
     }
 
@@ -1723,6 +1823,97 @@ final class AskSessionTests: XCTestCase {
         _ = await waitForSession { session.transcript[1].status == .completed }
         XCTAssertTrue(session.pendingMessages.isEmpty)
     }
+
+    // MARK: Conversation archive and session title (plan 008 Phase 8)
+
+    func testConversationArchiveGrowsAcrossTurns() async {
+        let launcher = MockLauncher()
+        let session = makeSession(launcher: launcher)
+        session.isExpanded = true
+        session.prompt = "what is a pelican?"
+        session.submit()
+
+        _ = await waitFor { launcher.count >= 1 }
+        let process = launcher.processes[0]
+        feedDroidInit(process)
+        _ = await waitForWritten(process, contains: "add_user_message")
+        feedDroidTurn(process, delta: "a big bird")
+        _ = await waitForSession { session.transcript.first?.status == .completed }
+
+        // One archive file exists after turn 1 and both the turn and the
+        // mirror point at it.
+        _ = await waitForSession { session.archiveURL != nil }
+        let firstURL = session.archiveURL
+        XCTAssertNotNil(firstURL)
+        XCTAssertEqual(session.transcript[0].archiveURL, firstURL)
+
+        session.prompt = "and its wingspan?"
+        session.submit()
+        _ = await waitForSession { writtenCount(process, containing: "add_user_message") >= 2 }
+        feedDroidTurn(process, delta: "about three metres")
+        _ = await waitForSession { session.transcript.count == 2 && session.transcript[1].status == .completed }
+
+        // The SAME file was rewritten with both turns.
+        XCTAssertEqual(session.archiveURL, firstURL, "turn 2 spawned a second archive file")
+        XCTAssertEqual(session.transcript[0].archiveURL, firstURL)
+        XCTAssertEqual(session.transcript[1].archiveURL, firstURL)
+        let body = (try? String(contentsOf: firstURL!, encoding: .utf8)) ?? ""
+        XCTAssertTrue(body.contains("## Turn 1"))
+        XCTAssertTrue(body.contains("what is a pelican?"))
+        XCTAssertTrue(body.contains("a big bird"))
+        XCTAssertTrue(body.contains("## Turn 2"))
+        XCTAssertTrue(body.contains("about three metres"))
+    }
+
+    func testDroidSessionTitleReachesHeaderAndArchiveName() async {
+        let launcher = MockLauncher()
+        let session = makeSession(launcher: launcher)
+        session.isExpanded = true
+        session.prompt = "help"
+        session.submit()
+
+        _ = await waitFor { launcher.count >= 1 }
+        let process = launcher.processes[0]
+        feedDroidInit(process)
+        _ = await waitForWritten(process, contains: "add_user_message")
+
+        // Droid names the session mid-turn; the raw notification must reach
+        // the session even while a turn is live.
+        process.feedStdout(#"{"jsonrpc":"2.0","method":"droid.session_notification","params":{"notification":{"type":"session_title_updated","title":"Fix the login bug!"}}}"#)
+        _ = await waitForSession { session.sessionTitle == "Fix the login bug!" }
+        XCTAssertEqual(session.sessionTitle, "Fix the login bug!")
+
+        feedDroidTurn(process, delta: "ok")
+        _ = await waitForSession { session.transcript.first?.status == .completed }
+        _ = await waitForSession { session.archiveURL != nil }
+
+        // The archive filename derives from the title.
+        let name = session.archiveURL?.lastPathComponent ?? ""
+        XCTAssertTrue(name.hasPrefix("droid-Fix-the-login-bug"), "unexpected archive name: \(name)")
+        let body = (try? String(contentsOf: session.archiveURL!, encoding: .utf8)) ?? ""
+        XCTAssertTrue(body.contains("- Title: Fix the login bug!"))
+    }
+
+    func testPiSessionNamedFromFirstQuestion() async {
+        let launcher = MockLauncher()
+        let session = makeSession(launcher: launcher, engine: .pi)
+        session.isExpanded = true
+        session.prompt = "explain the visitor pattern please"
+        session.submit()
+
+        _ = await waitFor { launcher.count >= 1 }
+        let process = launcher.processes[0]
+        _ = await waitForWritten(process, contains: #""type":"prompt""#)
+        feedPiTurn(process, delta: "sure")
+        _ = await waitForSession { session.transcript.first?.status == .completed }
+
+        // Pi doesn't push titles; AskDroid derives one from the first
+        // question and pushes it via set_session_name.
+        XCTAssertEqual(session.sessionTitle, "explain the visitor pattern please")
+        let sawName = await waitForWritten(process, contains: #""type":"set_session_name""#)
+        XCTAssertTrue(sawName, "set_session_name never sent")
+        XCTAssertTrue(process.written.joined().contains(#""name":"explain the visitor pattern please""#))
+    }
 }
 
 final class SettingsStoreTests: XCTestCase {
@@ -1860,7 +2051,8 @@ final class PiEngineStateMachineTests: XCTestCase {
         XCTAssertEqual(result?.model, "claude-3-5-sonnet-20241022")
         XCTAssertEqual(result?.tokenUsage?.inputTokens, 12)
         XCTAssertEqual(result?.tokenUsage?.outputTokens, 8)
-        XCTAssertNotNil(result?.archiveURL)
+        // Archiving is conversation-level since plan 008 Phase 8.
+        XCTAssertNil(result?.archiveURL)
         try? FileManager.default.removeItem(at: answers)
     }
 

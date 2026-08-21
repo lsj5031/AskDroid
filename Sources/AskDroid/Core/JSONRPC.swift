@@ -61,6 +61,8 @@ enum DroidNotification {
     /// `reason` is droid's `agent_turn_completed.reason` ("completed",
     /// "error", …). Dropping it used to report errored turns as successes.
     case turnCompleted(reason: String?, durationMs: Double?, tokenUsage: TokenUsage?)
+    /// The engine named the session (`session_title_updated`).
+    case sessionTitle(String)
     case ignored
 }
 
@@ -137,7 +139,7 @@ enum DroidNotificationParser {
             )
         case "session_title_updated":
             let title = (payload["title"] as? String) ?? (payload["name"] as? String) ?? ""
-            return title.isEmpty ? .ignored : .milestone("Session titled \(title)")
+            return title.isEmpty ? .ignored : .sessionTitle(title)
         default:
             return .ignored
         }
