@@ -3,6 +3,36 @@ import Foundation
 import ServiceManagement
 import UserNotifications
 
+/// One question-and-answer round in the conversation. The transcript is the
+/// source of truth; the session's flat published properties are mirrors of
+/// the newest turn kept for the current HUD surface.
+struct Turn: Identifiable, Equatable {
+    enum Status: Equatable {
+        case running
+        case completed
+        case failed
+        case interrupted
+    }
+
+    let id: UUID
+    var question: String
+    var images: [AttachedImage]
+    var answer: String
+    var thinking: String
+    var log: [String]
+    var status: Status
+    var errorMessage: String?
+    var durationText: String?
+    var tokenSummary: String?
+    var archiveURL: URL?
+}
+
+/// Context-window fill reported by the engine, for footer meta.
+struct ContextStats: Equatable {
+    let used: Int
+    let limit: Int
+}
+
 @MainActor
 final class AskSession: ObservableObject {
     enum Phase: Equatable {
@@ -11,6 +41,8 @@ final class AskSession: ObservableObject {
         case running
         case completed
         case failed
+        /// The turn was stopped on request; the conversation continues.
+        case interrupted
     }
 
     @Published var settings: AppSettings
@@ -18,6 +50,8 @@ final class AskSession: ObservableObject {
     @Published var isSettingsOpen = false
     @Published var prompt = ""
     @Published var images: [AttachedImage] = []
+    @Published var transcript: [Turn] = []
+    @Published var contextStats: ContextStats?
     @Published var answer = ""
     @Published var thinking = ""
     @Published var activity = ""
@@ -34,6 +68,9 @@ final class AskSession: ObservableObject {
 
     static let maxImageBytes = 5 * 1024 * 1024
     static let maxTotalImageBytes = 15 * 1024 * 1024
+    /// How long an open CLI session may sit unused before it is closed.
+    /// The session id stays in memory so a follow-up plan can reattach.
+    static let idleSessionTimeout: TimeInterval = 10 * 60
 
     let droidEngine: DroidEngine
     let piEngine: PiEngine
@@ -46,10 +83,19 @@ final class AskSession: ObservableObject {
     }
 
     private var runTask: Task<Void, Never>?
+    private var interruptTask: Task<Void, Never>?
     private var ticker: Task<Void, Never>?
     private var copiedResetTask: Task<Void, Never>?
+    private var idleTimer: Task<Void, Never>?
     private var runStartedAt: Date?
     private(set) var currentRunID: UUID?
+    /// The live conversation handle. A nil handle means the next submit
+    /// begins a fresh session.
+    private var activeHandle: SessionHandle?
+    private var isBeginningSession = false
+    /// Retained across an idle close; resumption across relaunches is a
+    /// documented follow-up plan.
+    private var retainedSessionID: String?
 
     init(
         settings: AppSettings = SettingsStore.load(),
@@ -94,6 +140,8 @@ final class AskSession: ObservableObject {
             "Done"
         case .failed:
             "Failed"
+        case .interrupted:
+            "Interrupted"
         default:
             "AskDroid"
         }
@@ -133,9 +181,13 @@ final class AskSession: ObservableObject {
         isSettingsOpen = false
     }
 
+    // MARK: Conversation lifecycle
+
+    /// Sends a follow-up turn. Prior turns stay in the transcript; only the
+    /// composer empties.
     func submit() {
         guard canSubmit, phase != .running else { return }
-        let runID = UUID()
+        let turnID = UUID()
         let request = EngineRequest(
             prompt: prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 ? "Look at the attached image(s)."
@@ -143,49 +195,85 @@ final class AskSession: ObservableObject {
             images: images,
             settings: settings
         )
-        answer = ""
-        thinking = ""
-        runLog = []
+        transcript.append(Turn(
+            id: turnID,
+            question: request.prompt,
+            images: request.images,
+            answer: "",
+            thinking: "",
+            log: [],
+            status: .running,
+            errorMessage: nil,
+            durationText: nil,
+            tokenSummary: nil,
+            archiveURL: nil
+        ))
+        prompt = ""
+        images = []
+        syncMirrorsToNewestTurn()
         errorMessage = nil
-        archiveURL = nil
         archiveError = nil
-        tokenSummary = nil
-        durationText = nil
         copied = false
         notice = nil
         phase = .running
         activity = "Starting \(settings.engine.title)…"
         runStartedAt = Date()
         elapsed = 0
-        currentRunID = runID
+        currentRunID = turnID
         startTicker()
+        touchSessionActivity()
 
         let client = self.engine
         runTask?.cancel()
-        runTask = Task { [client] in
-            await client.run(request, runID: runID) { [weak self] event in
-                Task { @MainActor in
-                    self?.handle(event)
-                }
+        runTask = Task { [client, weak self] in
+            guard let self else { return }
+            // Drain a pending interrupt first: it must land on the turn the
+            // user stopped, never on this new one.
+            if let interruptTask {
+                await interruptTask.value
+            }
+            guard let handle = await self.ensureSession(client) else { return }
+            await client.send(request, turnID: turnID, to: handle)
+        }
+    }
+
+    /// Stops the running turn without ending the conversation. The composer
+    /// is immediately usable again; this is not an error.
+    func interruptTurn() {
+        guard phase == .running, let turnID = currentRunID else { return }
+        let client = self.engine
+        let handle = activeHandle
+        runTask?.cancel()
+        ticker?.cancel()
+        interruptTask = Task { [client] in
+            if let handle {
+                await client.interrupt(handle)
             }
         }
+        // Local, immediate: don't wait for the engine's acknowledgement. The
+        // late .interrupted event routes here too and finds the turn terminal.
+        markTurnInterrupted(turnID)
+        AskLog.line("turn \(turnID.uuidString.prefix(8)) interrupted by user")
     }
 
-    func cancelRun() {
+    /// Clears the engine's conversation context and the transcript. The
+    /// footer's "New" button maps here. The handle stays live: Pi resets
+    /// in-process and droid relaunches inside the same handle.
+    func startNewConversation() {
         let client = self.engine
-        let runID = currentRunID
-        runTask?.cancel()
-        if let runID {
-            Task { await client.cancel(runID: runID) }
+        let handle = activeHandle
+        retainedSessionID = nil
+        Task { [client] in
+            if let handle {
+                await client.reset(handle)
+            }
         }
-        currentRunID = nil
-        ticker?.cancel()
-        phase = .failed
-        errorMessage = EngineError.cancelled.localizedDescription
-        activity = "Cancelled"
-        AskLog.line("run \(runID?.uuidString.prefix(8) ?? "none") cancelled by user")
+        transcript = []
+        clearConversationUI()
+        NotificationCenter.default.post(name: .askDroidResetComposer, object: nil)
     }
 
+    /// Clears the composer without dropping conversation context or history.
     func resetComposer() {
         prompt = ""
         images = []
@@ -203,6 +291,63 @@ final class AskSession: ObservableObject {
         activity = ""
         NotificationCenter.default.post(name: .askDroidResetComposer, object: nil)
     }
+
+    /// Called when the operator switches engines in Settings. Sessions are
+    /// engine-specific, so the live session closes and the transcript clears.
+    func engineDidChange() {
+        guard let handle = activeHandle else { return }
+        activeHandle = nil
+        retainedSessionID = nil
+        transcript = []
+        clearConversationUI()
+        let client = self.engine
+        Task { [client] in
+            await client.close(handle)
+        }
+    }
+
+    private func ensureSession(_ client: any EngineClient) async -> SessionHandle? {
+        if let handle = activeHandle { return handle }
+        guard !isBeginningSession else { return nil }
+        isBeginningSession = true
+        defer { isBeginningSession = false }
+        do {
+            let handle = try await client.begin(settings: settings) { [weak self] event in
+                Task { @MainActor in
+                    self?.handle(event)
+                }
+            }
+            activeHandle = handle
+            touchSessionActivity()
+            return handle
+        } catch {
+            failActiveTurn(error.localizedDescription)
+            return nil
+        }
+    }
+
+    private func closeIdleSession() async {
+        guard let handle = activeHandle else { return }
+        activeHandle = nil
+        retainedSessionID = await handle.state?.sessionID
+        AskLog.line("closing idle session id=\(retainedSessionID ?? "none")")
+        let client = self.engine
+        Task { [client] in
+            await client.close(handle)
+        }
+    }
+
+    private func touchSessionActivity() {
+        idleTimer?.cancel()
+        guard activeHandle != nil else { return }
+        idleTimer = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.idleSessionTimeout))
+            guard !Task.isCancelled else { return }
+            await self?.closeIdleSession()
+        }
+    }
+
+    // MARK: Attachments
 
     @discardableResult
     func attachFromPasteboard(_ pasteboard: NSPasteboard = .general) -> Bool {
@@ -246,6 +391,8 @@ final class AskSession: ObservableObject {
         images.removeAll { $0.id == image.id }
     }
 
+    // MARK: Answer actions
+
     func copyAnswer() {
         guard !answer.isEmpty else { return }
         NSPasteboard.general.clearContents()
@@ -278,67 +425,203 @@ final class AskSession: ObservableObject {
         NSApp.terminate(nil)
     }
 
+    // MARK: Engine events
+
     func handle(_ event: EngineEvent) {
         switch event {
-        case .started(let runID):
-            guard runID == currentRunID else { return }
+        case .started(let turnID):
+            guard turnID == currentRunID, turnByID(turnID)?.status == .running else { return }
             phase = .running
-            AskLog.line("run \(runID.uuidString.prefix(8)) started")
-        case .activity(let runID, let text):
-            guard runID == currentRunID else { return }
+            AskLog.line("turn \(turnID.uuidString.prefix(8)) started")
+        case .activity(let turnID, let text):
+            guard turnID == currentRunID, turnByID(turnID)?.status == .running else { return }
             activity = text
-        case .thinking(let runID, let text):
-            guard runID == currentRunID else { return }
-            thinking.append(text)
-        case .textDelta(let runID, let text):
-            guard runID == currentRunID else { return }
-            answer.append(text)
-        case .log(let runID, let text):
-            guard runID == currentRunID else { return }
-            appendLog(text)
-            AskLog.line("run: \(text)")
-        case .completed(let runID, let result):
-            guard runID == currentRunID, phase == .running else {
-                if let url = result.archiveURL {
-                    AskLog.line("late completion from run \(runID.uuidString.prefix(8)); archived \(url.lastPathComponent)")
-                    notifyLateArchive(url)
-                }
-                return
+        case .thinking(let turnID, let text):
+            guard turnID == currentRunID, turnByID(turnID)?.status == .running else { return }
+            mutateTurn(turnID) { $0.thinking.append(text) }
+        case .textDelta(let turnID, let text):
+            guard turnID == currentRunID, turnByID(turnID)?.status == .running else { return }
+            mutateTurn(turnID) { $0.answer.append(text) }
+        case .log(let turnID, let text):
+            guard turnID == currentRunID, turnByID(turnID)?.status == .running else { return }
+            mutateTurn(turnID) { turn in
+                appendLogLine(text, into: &turn.log)
             }
-            ticker?.cancel()
-            answer = result.text
-            archiveURL = result.archiveURL
-            archiveError = result.archiveError
-            tokenSummary = result.tokenUsage?.summary
-            durationText = AnswerArchive.formatDuration(result.duration)
-            if answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                activity = "\(settings.engine.title) ended the turn with no answer"
-                errorMessage = emptyAnswerMessage()
-                phase = .failed
-                AskLog.line("run \(runID.uuidString.prefix(8)) completed with empty answer")
-                notifyIfCollapsed(success: false)
-            } else {
-                activity = result.archiveError == nil ? "Done" : "Answer ready, file not saved"
-                phase = .completed
-                AskLog.line("run \(runID.uuidString.prefix(8)) completed archive=\(result.archiveURL?.lastPathComponent ?? "none") archiveError=\(result.archiveError ?? "none")")
-                notifyIfCollapsed(success: true)
-            }
-        case .failed(let runID, let message):
-            guard runID == currentRunID, phase == .running else { return }
-            ticker?.cancel()
-            errorMessage = message
-            activity = "Failed"
-            phase = .failed
-            AskLog.line("run \(runID.uuidString.prefix(8)) failed: \(message)")
-            notifyIfCollapsed(success: false)
-        case .interrupted, .sessionReady, .contextStats, .queueChanged, .sessionEnded:
-            // Wired up with the persistent-session UI (plan 008 Phase 5).
+            AskLog.line("turn: \(text)")
+        case .completed(let turnID, let result):
+            completeTurn(turnID, result)
+        case .failed(let turnID, let message):
+            failTurn(turnID, message)
+        case .interrupted(let turnID):
+            settleInterrupted(turnID)
+        case .sessionReady:
             break
+        case .contextStats(let used, let limit):
+            contextStats = ContextStats(used: used, limit: limit)
+        case .queueChanged:
+            break // steering lands in plan 008 Phase 7
+        case .sessionEnded(let reason):
+            sessionDidEnd(reason)
         }
     }
 
-    private func emptyAnswerMessage() -> String {
-        let log = runLog.joined(separator: "\n").lowercased()
+    // MARK: Turn bookkeeping
+
+    private func turnByID(_ id: UUID) -> Turn? {
+        transcript.first { $0.id == id }
+    }
+
+    /// Mutates a turn in place and refreshes the newest-turn mirrors when the
+    /// mutated turn is the one on display.
+    private func mutateTurn(_ id: UUID, _ mutate: (inout Turn) -> Void) {
+        guard let index = transcript.firstIndex(where: { $0.id == id }) else { return }
+        mutate(&transcript[index])
+        if index == transcript.count - 1 {
+            syncMirrorsToNewestTurn()
+        }
+    }
+
+    private func syncMirrorsToNewestTurn() {
+        guard let turn = transcript.last else {
+            answer = ""
+            thinking = ""
+            runLog = []
+            archiveURL = nil
+            tokenSummary = nil
+            durationText = nil
+            return
+        }
+        answer = turn.answer
+        thinking = turn.thinking
+        runLog = turn.log
+        archiveURL = turn.archiveURL
+        tokenSummary = turn.tokenSummary
+        durationText = turn.durationText
+    }
+
+    private func completeTurn(_ turnID: UUID, _ result: EngineResult) {
+        guard var turn = turnByID(turnID), turn.status == .running else {
+            if let url = result.archiveURL {
+                AskLog.line("late completion from turn \(turnID.uuidString.prefix(8)); archived \(url.lastPathComponent)")
+                notifyLateArchive(url)
+            }
+            return
+        }
+        ticker?.cancel()
+        turn.answer = result.text
+        turn.archiveURL = result.archiveURL
+        turn.tokenSummary = result.tokenUsage?.summary
+        turn.durationText = AnswerArchive.formatDuration(result.duration)
+        if turn.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            turn.status = .failed
+            turn.errorMessage = emptyAnswerMessage(for: turn)
+            replaceTurn(turn)
+            errorMessage = turn.errorMessage
+            activity = "\(settings.engine.title) ended the turn with no answer"
+            phase = .failed
+            AskLog.line("turn \(turnID.uuidString.prefix(8)) completed with empty answer")
+            notifyIfCollapsed(success: false)
+        } else {
+            turn.status = .completed
+            replaceTurn(turn)
+            archiveError = result.archiveError
+            activity = result.archiveError == nil ? "Done" : "Answer ready, file not saved"
+            phase = .completed
+            AskLog.line("turn \(turnID.uuidString.prefix(8)) completed archive=\(result.archiveURL?.lastPathComponent ?? "none") archiveError=\(result.archiveError ?? "none")")
+            notifyIfCollapsed(success: true)
+        }
+    }
+
+    private func failTurn(_ turnID: UUID, _ message: String) {
+        guard var turn = turnByID(turnID), turn.status == .running else { return }
+        ticker?.cancel()
+        turn.status = .failed
+        turn.errorMessage = message
+        replaceTurn(turn)
+        if turnID == currentRunID {
+            errorMessage = message
+            activity = "Failed"
+            phase = .failed
+            AskLog.line("turn \(turnID.uuidString.prefix(8)) failed: \(message)")
+            notifyIfCollapsed(success: false)
+        }
+    }
+
+    private func settleInterrupted(_ turnID: UUID) {
+        guard var turn = turnByID(turnID), turn.status == .running else { return }
+        ticker?.cancel()
+        turn.status = .interrupted
+        replaceTurn(turn)
+        if turnID == currentRunID, phase == .running {
+            activity = "Interrupted"
+            phase = .interrupted
+        }
+    }
+
+    private func markTurnInterrupted(_ turnID: UUID) {
+        guard var turn = turnByID(turnID), turn.status == .running else { return }
+        turn.status = .interrupted
+        replaceTurn(turn)
+        activity = "Interrupted"
+        phase = .interrupted
+    }
+
+    private func replaceTurn(_ turn: Turn) {
+        guard let index = transcript.firstIndex(where: { $0.id == turn.id }) else { return }
+        transcript[index] = turn
+        if index == transcript.count - 1 {
+            syncMirrorsToNewestTurn()
+        }
+    }
+
+    private func failActiveTurn(_ message: String) {
+        guard let turnID = currentRunID else { return }
+        ticker?.cancel()
+        if var turn = turnByID(turnID), turn.status == .running {
+            turn.status = .failed
+            turn.errorMessage = message
+            replaceTurn(turn)
+        }
+        errorMessage = message
+        activity = "Failed"
+        phase = .failed
+        AskLog.line("turn \(turnID.uuidString.prefix(8)) failed: \(message)")
+        notifyIfCollapsed(success: false)
+    }
+
+    private func sessionDidEnd(_ reason: String?) {
+        activeHandle = nil
+        guard let reason else { return } // nil = we closed it ourselves
+        AskLog.line("engine session ended: \(reason)")
+        if let turnID = currentRunID, phase == .running {
+            failTurn(turnID, reason)
+        }
+    }
+
+    private func clearConversationUI() {
+        prompt = ""
+        images = []
+        answer = ""
+        thinking = ""
+        runLog = []
+        errorMessage = nil
+        archiveURL = nil
+        archiveError = nil
+        tokenSummary = nil
+        durationText = nil
+        copied = false
+        notice = nil
+        contextStats = nil
+        activity = ""
+        currentRunID = nil
+        phase = isExpanded ? .composing : .idle
+    }
+
+    /// Diagnostics for a turn that produced no text. Reads that turn's own log
+    /// only — a previous turn's "connection error" must not leak into this
+    /// turn's explanation.
+    private func emptyAnswerMessage(for turn: Turn) -> String {
+        let log = turn.log.joined(separator: "\n").lowercased()
         let title = settings.engine.title
         if log.contains("connection error") {
             return "\(title) hit a connection error and couldn't reach the model. If you use a local or network model, make sure AskDroid has Local Network permission in System Settings → Privacy & Security → Local Network, then try again."
@@ -349,13 +632,13 @@ final class AskSession: ObservableObject {
         return "\(title) ended the turn without writing an answer. Open Activity to see what happened, then try again."
     }
 
-    private func appendLog(_ text: String) {
+    private func appendLogLine(_ text: String, into log: inout [String]) {
         let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { return }
-        if runLog.last == cleaned { return }
-        runLog.append(cleaned)
-        if runLog.count > 40 {
-            runLog.removeFirst(runLog.count - 40)
+        if log.last == cleaned { return }
+        log.append(cleaned)
+        if log.count > 40 {
+            log.removeFirst(log.count - 40)
         }
     }
 

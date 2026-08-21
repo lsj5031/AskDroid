@@ -141,7 +141,10 @@ struct ExpandedHUD: View {
     @State private var answerViewportHeight: CGFloat = 0
 
     private var showingResult: Bool {
-        session.phase == .running || session.phase == .failed || !session.answer.isEmpty
+        // After an interrupt the composer must be immediately usable, so the
+        // result surface steps aside (the transcript surface lands in Phase 6).
+        session.phase == .running || session.phase == .failed
+            || (session.phase != .interrupted && !session.answer.isEmpty)
     }
 
     var body: some View {
@@ -250,7 +253,7 @@ struct ExpandedHUD: View {
                 .help(session.prompt.isEmpty ? "Look at the attached image(s)." : session.prompt)
             Spacer(minLength: 8)
             if session.phase == .running {
-                Button("Cancel", action: session.cancelRun)
+                Button("Cancel", action: session.interruptTurn)
                     .buttonStyle(GhostButtonStyle())
             }
         }
@@ -513,12 +516,12 @@ struct ExpandedHUD: View {
             }
             if session.phase == .completed || session.phase == .failed {
                 Button {
-                    session.resetComposer()
+                    session.startNewConversation()
                 } label: {
                     Label("New", systemImage: "plus")
                 }
                 .buttonStyle(GhostButtonStyle())
-                .help("Start a new question")
+                .help("Start a new conversation")
             }
         }
         .padding(.horizontal, 20)

@@ -14,6 +14,8 @@ struct SettingsPane: View {
                 .labelsHidden()
                 .pickerStyle(.segmented)
                 .onChange(of: session.settings.engine) { _, newEngine in
+                    // Sessions are engine-specific: close the live one.
+                    session.engineDidChange()
                     if newEngine == .droid && session.settings.reasoning.droidProtocolValue == nil && session.settings.reasoning != .defaultLevel {
                         session.settings.reasoning = .defaultLevel
                     }

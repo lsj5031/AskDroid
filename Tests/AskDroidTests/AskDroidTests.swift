@@ -709,7 +709,7 @@ private func waitForWritten(_ process: MockProcess, contains needle: String, tim
     return false
 }
 
-private func waitFor(_ condition: @escaping () -> Bool, timeoutSeconds: Double = 5) async -> Bool {
+private func waitFor(_ condition: @escaping @Sendable () -> Bool, timeoutSeconds: Double = 5) async -> Bool {
     let deadline = Date().addingTimeInterval(timeoutSeconds)
     while Date() < deadline {
         if condition() { return true }
@@ -1263,7 +1263,7 @@ final class AskSessionTests: XCTestCase {
         XCTAssertIdentical(session.engine as? DroidEngine, injected)
     }
 
-    func testStaleEventsDroppedAfterCancel() async {
+    func testStaleEventsDroppedAfterInterrupt() async {
         let launcher = MockLauncher()
         let session = makeSession(launcher: launcher)
         session.isExpanded = true
@@ -1277,12 +1277,15 @@ final class AskSessionTests: XCTestCase {
         let idA = session.currentRunID
         XCTAssertNotNil(idA)
         XCTAssertEqual(session.phase, .running)
+        // Sends gate on droid's initialization handshake.
+        feedDroidInit(launcher.processes[0])
+        _ = await waitForWritten(launcher.processes[0], contains: "add_user_message")
 
-        session.cancelRun()
-        XCTAssertEqual(session.phase, .failed)
-        XCTAssertNil(session.currentRunID)
+        session.interruptTurn()
+        XCTAssertEqual(session.phase, .interrupted)
+        XCTAssertNil(session.errorMessage, "interrupting is not an error")
 
-        // Stale events from the cancelled run must not mutate the UI.
+        // Stale events from the interrupted turn must not mutate the UI.
         session.handle(.started(idA!))
         session.handle(.textDelta(idA!, "late text"))
         session.handle(.log(idA!, "late log"))
@@ -1295,8 +1298,8 @@ final class AskSessionTests: XCTestCase {
 
         XCTAssertEqual(session.answer, "")
         XCTAssertFalse(session.runLog.contains("late log"))
-        XCTAssertEqual(session.errorMessage, DroidEngineError.cancelled.localizedDescription)
-        XCTAssertEqual(session.phase, .failed)
+        XCTAssertEqual(session.phase, .interrupted)
+        XCTAssertEqual(session.transcript.first?.status, .interrupted)
     }
 
     func testImagePayloadCapSkipsOversized() {
@@ -1337,6 +1340,203 @@ final class AskSessionTests: XCTestCase {
         session.phase = .failed
         session.errorMessage = "Droid hit a connection error and could not reach the model."
         XCTAssertEqual(session.compactTitle, "Failed")
+    }
+
+    // MARK: Multi-turn transcript
+
+    @MainActor
+    private func waitForSession(_ condition: @escaping () -> Bool, timeoutSeconds: Double = 5) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if condition() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return false
+    }
+
+    private func feedDroidInit(_ process: MockProcess) {
+        process.feedStdout(#"{"jsonrpc":"2.0","id":"1","result":{"session":{"settings":{"modelId":"gpt-5"}}}}"#)
+    }
+
+    private func feedDroidTurn(_ process: MockProcess, delta: String?, reason: String = "completed") {
+        if let delta {
+            process.feedStdout(
+                #"{"jsonrpc":"2.0","method":"droid.session_notification","params":{"type":"assistant_text_delta","textDelta":"\#(delta)"}}"#
+            )
+        }
+        process.feedStdout(
+            #"{"jsonrpc":"2.0","method":"droid.session_notification","params":{"type":"agent_turn_completed","reason":"\#(reason)","durationMs":5}}"#
+        )
+    }
+
+    private func feedPiTurn(_ process: MockProcess, delta: String?) {
+        process.feedStdout(#"{"id":"1","type":"response","command":"prompt","success":true}"#)
+        if let delta {
+            process.feedStdout(
+                #"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"\#(delta)"}}"#
+            )
+        }
+        process.feedStdout(#"{"type":"agent_settled"}"#)
+    }
+
+    func testFollowUpKeepsPriorTurnsInTranscript() async {
+        let launcher = MockLauncher()
+        let session = makeSession(launcher: launcher)
+        session.isExpanded = true
+        session.prompt = "first"
+        session.submit()
+
+        _ = await waitFor { launcher.count >= 1 }
+        let process = launcher.processes[0]
+        feedDroidInit(process)
+        _ = await waitForWritten(process, contains: "add_user_message")
+        feedDroidTurn(process, delta: "Answer one")
+        _ = await waitForSession { session.transcript.first?.status == .completed }
+        XCTAssertEqual(session.transcript.count, 1)
+        XCTAssertEqual(session.transcript[0].answer, "Answer one")
+
+        // A follow-up must not wipe history.
+        session.prompt = "second"
+        session.submit()
+        let sawSecondMessage = await waitForSession { writtenCount(process, containing: "add_user_message") >= 2 }
+        XCTAssertTrue(sawSecondMessage)
+        feedDroidTurn(process, delta: "Answer two")
+        _ = await waitForSession { session.transcript.count == 2 && session.transcript[1].status == .completed }
+
+        XCTAssertEqual(session.transcript.count, 2)
+        XCTAssertEqual(session.transcript[0].question, "first")
+        XCTAssertEqual(session.transcript[0].answer, "Answer one")
+        XCTAssertEqual(session.transcript[1].answer, "Answer two")
+        XCTAssertEqual(session.answer, "Answer two", "mirror should show the newest turn")
+        XCTAssertEqual(launcher.count, 1, "follow-up relaunched the CLI")
+        XCTAssertFalse(process.terminated)
+    }
+
+    func testInterruptLeavesSessionUsableForNextTurn() async {
+        let launcher = MockLauncher()
+        let session = makeSession(launcher: launcher)
+        session.isExpanded = true
+        session.prompt = "first"
+        session.submit()
+
+        _ = await waitFor { launcher.count >= 1 }
+        let process = launcher.processes[0]
+        feedDroidInit(process)
+        _ = await waitForWritten(process, contains: "add_user_message")
+
+        session.interruptTurn()
+        XCTAssertEqual(session.phase, .interrupted)
+        XCTAssertEqual(session.transcript.first?.status, .interrupted)
+        XCTAssertNil(session.errorMessage)
+
+        // The same session serves the next turn.
+        session.prompt = "second"
+        session.submit()
+        let sawSecondMessage = await waitForSession { writtenCount(process, containing: "add_user_message") >= 2 }
+        XCTAssertTrue(sawSecondMessage)
+        feedDroidTurn(process, delta: "Answer two")
+        _ = await waitForSession { session.transcript.count == 2 && session.transcript[1].status == .completed }
+
+        XCTAssertEqual(session.transcript[0].status, .interrupted)
+        XCTAssertEqual(session.transcript[1].status, .completed)
+        XCTAssertEqual(launcher.count, 1)
+        XCTAssertFalse(process.terminated)
+    }
+
+    func testStartNewConversationClearsTranscript() async {
+        let launcher = MockLauncher()
+        let session = makeSession(launcher: launcher, engine: .pi)
+        session.isExpanded = true
+        session.prompt = "first"
+        session.submit()
+
+        _ = await waitFor { launcher.count >= 1 }
+        let process = launcher.processes[0]
+        _ = await waitForWritten(process, contains: #""type":"prompt""#)
+        feedPiTurn(process, delta: "One")
+        _ = await waitForSession { session.transcript.first?.status == .completed }
+        XCTAssertEqual(session.transcript.count, 1)
+
+        session.startNewConversation()
+        _ = await waitForWritten(process, contains: #""type":"new_session""#)
+        XCTAssertTrue(session.transcript.isEmpty, "transcript survived a new conversation")
+        XCTAssertEqual(session.phase, .composing)
+        XCTAssertEqual(launcher.count, 1, "reset relaunched the CLI")
+        XCTAssertFalse(process.terminated, "reset killed the process")
+
+        // The conversation is usable again on the same process.
+        session.prompt = "second"
+        session.submit()
+        let sawSecondPrompt = await waitForSession { writtenCount(process, containing: #""type":"prompt""#) >= 2 }
+        XCTAssertTrue(sawSecondPrompt)
+        feedPiTurn(process, delta: "Two")
+        _ = await waitForSession { session.transcript.count == 1 && session.transcript[0].status == .completed }
+        XCTAssertEqual(session.transcript[0].answer, "Two")
+        XCTAssertEqual(launcher.count, 1)
+    }
+
+    func testPerTurnLogDoesNotLeakIntoNextTurnDiagnostics() async {
+        let launcher = MockLauncher()
+        let session = makeSession(launcher: launcher)
+        session.isExpanded = true
+        session.prompt = "one"
+        session.submit()
+
+        _ = await waitFor { launcher.count >= 1 }
+        let process = launcher.processes[0]
+        feedDroidInit(process)
+        _ = await waitForWritten(process, contains: "add_user_message")
+        // Turn 1 hits a connection error: tool noise, error notification,
+        // then agent_turn_completed with reason "error".
+        process.feedStdout(#"{"jsonrpc":"2.0","method":"droid.session_notification","params":{"type":"tool_call","toolUse":{"name":"Read","id":"9","input":{"path":"x.swift"}}}}"#)
+        process.feedStdout(#"{"jsonrpc":"2.0","method":"droid.session_notification","params":{"type":"error","message":"Connection error."}}"#)
+        feedDroidTurn(process, delta: nil, reason: "error")
+        _ = await waitForSession { session.transcript.first?.status == .failed }
+        XCTAssertEqual(session.errorMessage?.lowercased().contains("connection error"), true)
+
+        // Turn 2 completes with no text; its diagnostics must be generic.
+        session.prompt = "two"
+        session.submit()
+        _ = await waitForSession { writtenCount(process, containing: "add_user_message") >= 2 }
+        feedDroidTurn(process, delta: nil, reason: "completed")
+        _ = await waitForSession { session.transcript.count == 2 && session.transcript[1].status != .running }
+
+        XCTAssertEqual(session.transcript[1].status, .failed)
+        XCTAssertNotNil(session.transcript[1].errorMessage, "empty-answer turn should carry an explanation")
+        XCTAssertFalse(session.errorMessage?.lowercased().contains("connection error") ?? true,
+                       "turn 1's connection error leaked into turn 2's diagnostics")
+        XCTAssertTrue(session.errorMessage?.contains("without writing an answer") ?? false)
+    }
+
+    func testEngineSwitchClosesSession() async {
+        let launcher = MockLauncher()
+        let session = makeSession(launcher: launcher, engine: .pi)
+        session.isExpanded = true
+        session.prompt = "first"
+        session.submit()
+
+        _ = await waitFor { launcher.count >= 1 }
+        let process = launcher.processes[0]
+        _ = await waitForWritten(process, contains: #""type":"prompt""#)
+        feedPiTurn(process, delta: "One")
+        _ = await waitForSession { session.transcript.first?.status == .completed }
+
+        session.engineDidChange()
+        XCTAssertTrue(session.transcript.isEmpty, "transcript should not follow a new engine")
+        _ = await waitForSession { process.terminated }
+        XCTAssertEqual(launcher.count, 1)
+
+        // The next submit starts a fresh session for the (same) engine.
+        session.prompt = "second"
+        session.submit()
+        _ = await waitForSession { launcher.count >= 2 }
+        let fresh = launcher.processes[1]
+        _ = await waitForWritten(fresh, contains: #""type":"prompt""#)
+        feedPiTurn(fresh, delta: "Two")
+        _ = await waitForSession { session.transcript.first?.status == .completed }
+        XCTAssertEqual(session.transcript.count, 1)
+        XCTAssertEqual(session.transcript[0].answer, "Two")
+        XCTAssertEqual(launcher.count, 2)
     }
 }
 

@@ -621,6 +621,9 @@ actor SessionHandle {
     private var turnTimer: Task<Void, Never>?
     private(set) var lastExitStatus: Int32?
     private(set) var didClose = false
+    /// Set synchronously inside `open()` so concurrent callers can't launch
+    /// twice while the first open is suspended in the launcher.
+    private var isOpening = false
 
     init(
         engine: Engine,
@@ -651,7 +654,9 @@ actor SessionHandle {
     /// and sends the engine's initialization handshake. Readiness is awaited
     /// per turn (see `send`) so cancelling never blocks `begin`.
     func open() async throws {
-        guard connection == nil else { return }
+        guard connection == nil, !isOpening else { return }
+        isOpening = true
+        defer { isOpening = false }
         lastExitStatus = nil
         let process = try await makeProcess()
         let state = EngineSession(engine: engine, settings: settings)
@@ -679,6 +684,11 @@ actor SessionHandle {
         // is gone even if `lastExitStatus` hasn't landed yet.
         if let conn = connection, conn.process.readersAreClosed || lastExitStatus != nil {
             connection = nil
+        }
+        // A reset/relaunch may be mid-flight; ride along instead of opening a
+        // second process.
+        while connection == nil, isOpening, !didClose {
+            try? await Task.sleep(for: .milliseconds(10))
         }
         if connection == nil {
             guard lifetime == .persistent else {
@@ -856,24 +866,38 @@ actor SessionHandle {
         let turnEnder: TurnEnder = { [weak self] turn, outcome in
             await self?.endTurn(turn, outcome)
         }
-        let stdoutTask = Task.detached { [weak self] in
-            let reader = LineReader()
-            while true {
-                let data = process.standardOutput.availableData
-                if data.isEmpty { break }
-                for line in reader.push(data) {
-                    await self?.route(line, process: process, state: state, turnEnder: turnEnder, isStdout: true)
+        // Blocking `availableData` reads must not occupy Swift's cooperative
+        // thread pool: a persistent session parks its readers for the life of
+        // the process, and parked pool threads starve every other task. The
+        // reads run on GCD utility threads and hand lines to an ordered
+        // AsyncStream consumed on the pool.
+        func makeLineStream(_ handle: FileHandle) -> AsyncStream<String> {
+            AsyncStream { continuation in
+                DispatchQueue.global(qos: .utility).async {
+                    let reader = LineReader()
+                    while true {
+                        let data = handle.availableData
+                        if data.isEmpty { break }
+                        for line in reader.push(data) {
+                            continuation.yield(line)
+                        }
+                    }
+                    continuation.finish()
                 }
             }
         }
+
+        let stdoutLines = makeLineStream(process.standardOutput)
+        let stderrLines = makeLineStream(process.standardError)
+
+        let stdoutTask = Task.detached { [weak self] in
+            for await line in stdoutLines {
+                await self?.route(line, process: process, state: state, turnEnder: turnEnder, isStdout: true)
+            }
+        }
         let stderrTask = Task.detached { [weak self] in
-            let reader = LineReader()
-            while true {
-                let data = process.standardError.availableData
-                if data.isEmpty { break }
-                for line in reader.push(data) {
-                    await self?.route(line, process: process, state: state, turnEnder: turnEnder, isStdout: false)
-                }
+            for await line in stderrLines {
+                await self?.route(line, process: process, state: state, turnEnder: turnEnder, isStdout: false)
             }
         }
         readers = [stdoutTask, stderrTask]
