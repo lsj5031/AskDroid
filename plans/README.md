@@ -13,12 +13,13 @@ your row when done.
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
 | 001  | Reject oversized images before reading or decoding a file | P1 | S | — | TODO |
-| 002  | Force EOF on engine pipes after exit so the runner never deadlocks | P1 | M | — | TODO |
-| 003  | Expose engine timeout constants for tests and cover the timeout branches | P2 | M | — | TODO |
+| 002  | Force EOF on engine pipes after exit so the runner never deadlocks | P1 | M | — | DONE via 008 (folded into Phase 1 Step 1.4: `ProcessIO.closeReaders()` + death-watch join) |
+| 003  | Expose engine timeout constants for tests and cover the timeout branches | P2 | M | — | SUPERSEDED by 008 (timeouts became internal `Configuration` fields; single-shot branches replaced by per-turn timer) |
 | 004  | Test the SettingsStore migration paths | P2 | S | — | TODO |
 | 005  | Deduplicate the tool-activity label mapping | P3 | S | — | TODO |
 | 006  | Restrict answer-link opening to http/https | P3 | S | — | TODO |
 | 007  | Surface Carbon handler-install failure in the hotkey conflict notice | P3 | S | — | TODO |
+| 008  | Keep talking to the agent — persistent multi-turn conversation | P1 | XL | conflicts with 002, 003 | DONE (executed on `advisor/008-multi-turn-conversation`, `eb7c875`; 93 tests, 1 skipped, 0 failures; reviewed) |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJECTED (with one-line rationale — finding fixed independently or approach abandoned)
 
@@ -33,19 +34,35 @@ Status values: TODO | IN PROGRESS | DONE | BLOCKED (with one-line reason) | REJE
   prefer landing 002 first (a deadlock fix is worth more than test plumbing).
 - Verification baseline for every plan: `swift build` (exit 0) and `swift test`
   → 65 tests, 1 skipped, 0 failures, before adding each plan's new tests.
+  (Re-confirmed at commit `1d8cad0`, 2026-08-21.)
+- **008 conflicts with 002 and 003 — RESOLVED.** 008 executed first (2026-08-21)
+  on `advisor/008-multi-turn-conversation`: its Phase 1 folded in 002's
+  `closeReaders()` (002 → DONE via 008) and made 003 a no-op by carrying the
+  timeouts as internal `Configuration` fields (003 → superseded). All three
+  touch-points now live in the restructured `SessionHandle` lifecycle.
+  001 and 004–007 remain independent TODOs.
 
 ## Findings considered and rejected
 
 - **Droid* typealiases, `ReasoningSetting.droidDefault`, no-arg `EngineError`
   shorthands**: retained intentionally — exercised by the test suite and a
   reasonable AskDroidKit facade (from a prior review round; do not re-audit).
-- **PiEngine cancel abort-then-terminate race**: harmless, retained.
+- **PiEngine cancel abort-then-terminate race**: harmless, retained — *for the
+  legacy one-shot `run()` path only. Superseded for the persistent path by
+  008* (landed): `interrupt` writes `abort` and never terminates; the session
+  stays usable. The legacy convenience still kills the process by design so
+  baseline cancel semantics are unchanged.
 - **Unconditional `cancelled: true` reply to `pi extension_ui_request`
   dialogs**: acceptable for a one-shot ask UI, retained.
 - **Single-shot accept/turn timeouts (no per-activity reset)**: by design
   ("did not finish in 10 minutes"); only the *testability* of the branches was
-  planned (003), not a behavior change.
+  planned (003), not a behavior change. *008 changes this by necessity*: the
+  turn timeout becomes per-turn (restarted each turn, cancelled at turn end)
+  while the accept timeout stays session-scoped.
 - **Notch/pill live window behavior and Carbon hotkey firing**: only
   verifiable on physical hardware; geometry math and state logic were audited.
 - **Crash-mid-run answer persistence**: optional product hardening direction,
-  not planned (see findings table in audit summary).
+  not planned (see findings table in audit summary). *008 partially addresses
+  it*: unexpected process exit becomes an explicit failure path, and the
+  conversation archive is rewritten per turn so a crash leaves prior turns on
+  disk.
